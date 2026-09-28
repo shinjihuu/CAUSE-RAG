@@ -110,10 +110,10 @@ except ImportError as exc:  # pragma: no cover - dependency guard
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_DIR = BASE_DIR / "dataset" / "04_normalized"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
-DEFAULT_MAX_OUTPUT_TOKENS = 1600
+DEFAULT_MAX_OUTPUT_TOKENS = 2600
 
-SCHEMA_VERSION = "cause-rag-normalization-v1.0"
-PROMPT_VERSION = "cause-rag-structuring-v1.1"
+SCHEMA_VERSION = "cause-rag-normalization-v1.1"
+PROMPT_VERSION = "cause-rag-structuring-v1.2"
 
 
 # ==============================================================================
@@ -125,8 +125,50 @@ FieldBasis = Literal["EXPLICIT", "METADATA", "QUESTION_INHERITED", "UNKNOWN"]
 PeriodPrecision = Literal["DAY", "MONTH", "YEAR", "QUARTER", "UNKNOWN"]
 PeriodType = Literal["POINT_IN_TIME", "DURATION", "UNKNOWN"]
 ScopeCode = Literal["CFS", "OFS", "SEGMENT", "ENTITY_ONLY", "UNKNOWN"]
-StatementCode = Literal["BS", "IS", "CIS", "CF", "SCE", "NON_FINANCIAL", "UNKNOWN"]
+StatementCode = Literal[
+    "BS",
+    "IS",
+    "CIS",
+    "CF",
+    "SCE",
+    "NOTE",
+    "SUMMARY_FINANCIAL",
+    "BUSINESS",
+    "MDA",
+    "SUSTAINABILITY",
+    "OTHER",
+    "UNKNOWN",
+]
 VersionCode = Literal["ORIGINAL", "CORRECTED", "UNKNOWN"]
+EntityLevel = Literal["COMPANY", "SUBSIDIARY", "SEGMENT", "UNKNOWN"]
+ValueType = Literal[
+    "ABSOLUTE",
+    "CHANGE",
+    "RATIO",
+    "PERCENTAGE_POINT",
+    "RANGE",
+    "FORECAST",
+    "UNKNOWN",
+]
+
+
+class CandidateClaim(BaseModel):
+    """Alternative raw claim retained when one evidence contains many values."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    subject_raw: str | None
+    entity_level: EntityLevel
+    parent_entity_raw: str | None
+    metric_raw: str | None
+    value_text_raw: str | None
+    value_raw: str | None
+    unit_raw: str | None
+    value_type: ValueType
+    period_raw: str | None
+    scope_raw: str | None
+    statement_raw: str | None
+    evidence_span: str | None
 
 
 class LLMExtraction(BaseModel):
@@ -138,6 +180,8 @@ class LLMExtraction(BaseModel):
 
     entity_raw: str | None
     entity_canonical: str | None
+    entity_level: EntityLevel
+    parent_entity_raw: str | None
     entity_basis: FieldBasis
 
     metric_raw: str | None
@@ -169,11 +213,16 @@ class LLMExtraction(BaseModel):
         description="Exact value phrase, e.g. '1,200억 원' or '(350)백만원'."
     )
     value_raw: str | None = Field(
-        description="Exact numeric token only, e.g. '1,200', '(350)', or '15.2'."
+        description=(
+            "Exact raw value expression. For compound currency keep the whole "
+            "expression, e.g. '12조 8,527억원'; otherwise keep the numeric token."
+        )
     )
     unit_raw: str | None = Field(
         description="Exact unit token, e.g. '억원', 'million KRW', '%', or '배'."
     )
+    value_type: ValueType
+    candidate_claims: list[CandidateClaim]
     value_basis: FieldBasis
 
     version_raw: str | None
@@ -326,7 +375,7 @@ def normalize_metric(
     raw: str | None,
     llm_canonical: str | None,
     question_anchor: dict[str, Any] | None,
-    llm_says_match: bool | None,
+    _llm_says_match: bool | None,
 ) -> tuple[str | None, str | None, str]:
     rule_metric = canonical_metric_from_text(raw, llm_canonical)
     llm_metric = safe_snake_case(llm_canonical)
@@ -339,7 +388,8 @@ def normalize_metric(
         same_by_raw = bool(
             raw and anchor_raw and compact_key(raw) == compact_key(anchor_raw)
         )
-        if anchor_metric and (llm_says_match is True or same_by_rule or same_by_raw):
+        # Never let an LLM boolean overwrite an explicitly different metric.
+        if anchor_metric and (same_by_rule or same_by_raw):
             return (
                 anchor_metric,
                 metric_comparison_key(anchor_metric),
@@ -500,6 +550,61 @@ KOREAN_COMPOUND_CURRENCY = re.compile(
 )
 
 
+def canonical_currency_unit(raw_unit: str) -> str:
+    """Canonicalize one Korean currency component without losing its raw form."""
+    unit = raw_unit.replace(" ", "")
+    return {
+        "조": "조원",
+        "억": "억원",
+        "백만원": "백만원",
+        "만원": "만원",
+        "천원": "천원",
+        "원": "원",
+    }.get(unit, unit)
+
+
+def extract_value_components(value_text_raw: str | None) -> list[dict[str, str]]:
+    """Return every explicit Korean currency component in source order.
+
+    Example: ``12조 8,527억원`` becomes two components instead of silently
+    retaining only the last ``8,527억원`` token.
+    """
+    components: list[dict[str, str]] = []
+    for match in KOREAN_COMPOUND_CURRENCY.finditer(clean_text(value_text_raw)):
+        number = decimal_from_raw(match.group("num"))
+        raw_unit = match.group("unit")
+        canonical_unit = canonical_currency_unit(raw_unit)
+        scale = CURRENCY_SCALES.get(canonical_unit)
+        if number is None or scale is None:
+            continue
+        components.append(
+            {
+                "expression_raw": clean_text(match.group(0)),
+                "value_raw": clean_text(match.group("num")),
+                "unit_raw": clean_text(raw_unit),
+                "unit_canonical": canonical_unit,
+                "value_normalized": decimal_to_string(number * scale) or "0",
+                "unit_normalized": "KRW",
+            }
+        )
+    return components
+
+
+def resolve_raw_value_fields(
+    value_text_raw: str | None,
+    llm_value_raw: str | None,
+    llm_unit_raw: str | None,
+) -> tuple[str | None, str | None, list[dict[str, str]]]:
+    """Prefer an inline explicit currency expression over inferred metadata."""
+    components = extract_value_components(value_text_raw)
+    if not components:
+        return llm_value_raw, llm_unit_raw, []
+
+    expression = " ".join(item["expression_raw"] for item in components)
+    units = "+".join(item["unit_canonical"] for item in components)
+    return expression, units, components
+
+
 def normalize_compound_krw(value_text_raw: str | None) -> Decimal | None:
     text = clean_text(value_text_raw)
     if not text:
@@ -515,15 +620,7 @@ def normalize_compound_krw(value_text_raw: str | None) -> Decimal | None:
             number = decimal_from_raw(part.group("num"))
             if number is None:
                 return None
-            unit = part.group("unit").replace(" ", "")
-            unit = {
-                "조": "조원",
-                "억": "억원",
-                "백만원": "백만원",
-                "만원": "만원",
-                "천원": "천원",
-                "원": "원",
-            }.get(unit, unit)
+            unit = canonical_currency_unit(part.group("unit"))
             scale = CURRENCY_SCALES.get(unit)
             if scale is None:
                 return None
@@ -551,17 +648,30 @@ def normalize_value_unit(
     compound = normalize_compound_krw(value_text_raw)
     token = normalize_unit_token(unit_raw)
 
-    # A multi-part Korean currency expression must be summed, not multiplied
-    # using only the first unit.
+    # An inline Korean currency expression has higher authority than a table or
+    # metadata unit. This also handles a single expression such as ``1조`` when
+    # stale metadata incorrectly says ``백만원``.
     compound_parts = list(KOREAN_COMPOUND_CURRENCY.finditer(clean_text(value_text_raw)))
-    if compound is not None and len(compound_parts) >= 2:
+    if compound is not None and compound_parts:
+        component_value = decimal_from_raw(compound_parts[0].group("num"))
+        multiplier = (
+            CURRENCY_SCALES.get(
+                canonical_currency_unit(compound_parts[0].group("unit"))
+            )
+            if len(compound_parts) == 1
+            else None
+        )
         return ValueNormalization(
-            value_parsed=decimal_to_string(parsed),
+            value_parsed=(
+                decimal_to_string(component_value) if len(compound_parts) == 1 else None
+            ),
             unit_normalized="KRW",
             value_normalized=decimal_to_string(compound),
-            conversion_multiplier=None,
+            conversion_multiplier=decimal_to_string(multiplier),
             unit_dimension="currency",
-            method="COMPOUND_KRW_RULE",
+            method=(
+                "INLINE_KRW_RULE" if len(compound_parts) == 1 else "COMPOUND_KRW_RULE"
+            ),
         )
 
     if parsed is None:
@@ -655,6 +765,27 @@ def normalize_value_unit(
         method="UNKNOWN_UNIT_IDENTITY",
         warning=f"미등록 단위: {unit_raw}",
     )
+
+
+def normalize_value_type(raw_text: str | None, llm_value_type: str) -> tuple[str, str]:
+    """Classify the role of a value so changes are not compared with absolutes."""
+    text = clean_text(raw_text).lower()
+    compact = compact_key(text)
+    if any(token in compact for token in ("전년대비", "대비", "증가", "감소", "증감")):
+        return "CHANGE", "RAW_RULE"
+    if any(token in compact for token in ("전망", "예상", "forecast", "estimate")):
+        return "FORECAST", "RAW_RULE"
+    if any(token in text for token in ("%p", "%pt", "percentage point")):
+        return "PERCENTAGE_POINT", "RAW_RULE"
+    if "%" in text or "퍼센트" in compact:
+        return "RATIO", "RAW_RULE"
+    if re.search(r"\d\s*[~～-]\s*\d", text):
+        return "RANGE", "RAW_RULE"
+    if llm_value_type != "UNKNOWN":
+        return llm_value_type, "LLM_CANONICAL"
+    if text:
+        return "ABSOLUTE", "DEFAULT_ABSOLUTE"
+    return "UNKNOWN", "UNKNOWN"
 
 
 # ==============================================================================
@@ -813,9 +944,10 @@ def normalize_scope(raw: str | None, llm_scope: str) -> tuple[str, str]:
         return "CFS", "RAW_RULE"
     if any(token in key for token in ("별도", "개별", "separate", "standalone", "ofs")):
         return "OFS", "RAW_RULE"
+    # Segment is an entity level, not a consolidation scope.
     if any(token in key for token in ("부문", "segment")):
-        return "SEGMENT", "RAW_RULE"
-    if llm_scope in {"CFS", "OFS", "SEGMENT", "ENTITY_ONLY"}:
+        return "UNKNOWN", "SEGMENT_IS_NOT_SCOPE"
+    if llm_scope in {"CFS", "OFS", "ENTITY_ONLY"}:
         return llm_scope, "LLM_CANONICAL"
     return "UNKNOWN", "UNKNOWN"
 
@@ -831,11 +963,28 @@ def normalize_statement(raw: str | None, llm_statement: str) -> tuple[str, str]:
         (("포괄손익계산서", "comprehensiveincome"), "CIS"),
         (("손익계산서", "incomestatement"), "IS"),
         (("재무상태표", "balancesheet", "financialposition"), "BS"),
+        (("요약재무정보", "summaryfinancial"), "SUMMARY_FINANCIAL"),
+        (("주석", "note"), "NOTE"),
+        (("사업의내용", "business"), "BUSINESS"),
+        (("경영진단", "md&a", "mda"), "MDA"),
+        (("지속가능", "sustainability"), "SUSTAINABILITY"),
     )
     for aliases, code in ordered:
         if any(alias in key for alias in aliases):
             return code, "RAW_RULE"
-    if llm_statement in {"BS", "IS", "CIS", "CF", "SCE", "NON_FINANCIAL"}:
+    if llm_statement in {
+        "BS",
+        "IS",
+        "CIS",
+        "CF",
+        "SCE",
+        "NOTE",
+        "SUMMARY_FINANCIAL",
+        "BUSINESS",
+        "MDA",
+        "SUSTAINABILITY",
+        "OTHER",
+    }:
         return llm_statement, "LLM_CANONICAL"
     return "UNKNOWN", "UNKNOWN"
 
@@ -966,19 +1115,40 @@ Rules:
 2. Copy raw strings exactly for entity_raw, metric_raw, period_raw,
    scope_raw, statement_raw, value_text_raw, value_raw, unit_raw, version_raw,
    and evidence_span.
-3. value_raw is the numeric token only; unit_raw is the unit token only.
-4. For a question, a requested value may be absent. Do not fabricate it.
-5. For evidence, select the claim that best answers the supplied question.
-6. The question anchor has priority only for canonical naming. If evidence
-   explicitly refers to a different entity/metric/period/scope, preserve that
-   difference and set the corresponding *_matches_question to false.
-7. QUESTION_INHERITED is allowed only when the evidence or its metadata clearly
-   belongs to the question context and merely omits a repeated label.
-8. metric_canonical must be stable English snake_case when identifiable.
-9. period hints use only YYYY, YYYY-MM, or YYYY-MM-DD. Do not invent a month/day.
-10. Scope: consolidated/연결=CFS, separate/별도=OFS. Unknown stays UNKNOWN.
-11. Statement: BS/IS/CIS/CF/SCE/NON_FINANCIAL/UNKNOWN.
-12. If several equally plausible values remain, return AMBIGUOUS and explain in warnings.
+3. QUESTION record: extract every requested condition even though the answer
+   value is absent. A missing answer value does NOT make the question
+   NOT_FOUND. Set OK when Entity/Metric/Period/Scope can be identified.
+4. EVIDENCE record: the question is only a selection and comparison anchor.
+   Never copy Entity, Period, Scope, Statement, Value, or Unit from the question
+   when the evidence and its metadata do not state it. Missing evidence fields
+   stay null/UNKNOWN; do not use QUESTION_INHERITED for evidence.
+5. For a compound amount, preserve the complete expression. Example:
+   value_text_raw='12조 8,527억원', value_raw='12조 8,527억원',
+   unit_raw='조원+억원'. Never keep only the final 8,527억원 component.
+6. Inline explicit units outrank table headers and metadata. If they disagree,
+   retain the inline expression and describe the disagreement in warnings.
+7. value_type distinguishes ABSOLUTE, CHANGE, RATIO, PERCENTAGE_POINT, RANGE,
+   FORECAST, and UNKNOWN. '전년 대비 1조 증가' is CHANGE, not an absolute
+   operating-profit value.
+8. entity_level distinguishes COMPANY, SUBSIDIARY, SEGMENT, and UNKNOWN.
+   Keep parent_entity_raw for a segment/subsidiary when known.
+9. For evidence, select one primary claim only when it directly answers the
+   question at the same entity level. If a chunk contains several segment
+   values but no company total, return AMBIGUOUS, leave the primary value null,
+   and list every visible alternative in candidate_claims. Each candidate must
+   preserve its own subject, metric, full value expression, unit, period,
+   scope, statement, value_type, and shortest exact evidence span. For a
+   QUESTION record candidate_claims must be an empty list.
+10. metric_canonical must be stable English snake_case when identifiable.
+11. Period hints use only YYYY, YYYY-MM, or YYYY-MM-DD. Do not invent a
+   month/day. Flow metrics such as revenue and operating profit are DURATION;
+   balance-sheet metrics such as total assets are POINT_IN_TIME.
+12. Scope means consolidation basis: consolidated/연결=CFS,
+   separate/별도=OFS. Segment identity belongs in entity_level, not Scope.
+13. Statement is one of BS/IS/CIS/CF/SCE/NOTE/SUMMARY_FINANCIAL/BUSINESS/MDA/
+   SUSTAINABILITY/OTHER/UNKNOWN. Preserve the raw source label.
+14. Set each *_matches_question to null when either side is unknown. Never mark
+   a missing evidence condition as matching merely because the question has it.
 """.strip()
 
 
@@ -1070,7 +1240,7 @@ def normalize_entity(
     raw: str | None,
     canonical: str | None,
     question_anchor: dict[str, Any] | None,
-    llm_says_match: bool | None,
+    _llm_says_match: bool | None,
 ) -> tuple[str | None, str | None, str]:
     candidate = clean_text(canonical) or clean_text(raw) or None
     if question_anchor:
@@ -1082,11 +1252,163 @@ def normalize_entity(
         same_raw = bool(
             raw and anchor_raw and compact_key(raw) == compact_key(anchor_raw)
         )
-        if anchor and (llm_says_match is True or same or same_raw):
+        # Never collapse a segment/subsidiary into the question company solely
+        # because the model emitted entity_matches_question=true.
+        if anchor and (same or same_raw):
             return anchor, compact_key(anchor), "QUESTION_ANCHOR"
     if candidate:
         return candidate, compact_key(candidate), "LLM_OR_RAW"
     return None, None, "UNKNOWN"
+
+
+def normalize_candidate_claims(
+    candidates: list[CandidateClaim],
+) -> list[dict[str, Any]]:
+    """Normalize alternatives without promoting one to the primary claim."""
+    normalized: list[dict[str, Any]] = []
+    for index, candidate in enumerate(candidates, 1):
+        value_raw, unit_raw, components = resolve_raw_value_fields(
+            candidate.value_text_raw,
+            candidate.value_raw,
+            candidate.unit_raw,
+        )
+        value = normalize_value_unit(candidate.value_text_raw, value_raw, unit_raw)
+        value_type, value_type_method = normalize_value_type(
+            candidate.value_text_raw or candidate.evidence_span,
+            candidate.value_type,
+        )
+        metric, metric_key, metric_method = normalize_metric(
+            candidate.metric_raw,
+            None,
+            None,
+            None,
+        )
+        period = normalize_period(
+            candidate.period_raw,
+            None,
+            None,
+            "UNKNOWN",
+            "UNKNOWN",
+        )
+        scope, scope_method = normalize_scope(candidate.scope_raw, "UNKNOWN")
+        statement, statement_method = normalize_statement(
+            candidate.statement_raw, "UNKNOWN"
+        )
+        normalized.append(
+            {
+                "candidate_index": index,
+                "subject_raw": candidate.subject_raw,
+                "entity_level": candidate.entity_level,
+                "parent_entity_raw": candidate.parent_entity_raw,
+                "metric_raw": candidate.metric_raw,
+                "metric": metric,
+                "metric_key": metric_key,
+                "metric_normalization_method": metric_method,
+                "value_text_raw": candidate.value_text_raw,
+                "value_raw_llm": candidate.value_raw,
+                "unit_raw_llm": candidate.unit_raw,
+                "value_raw": value_raw,
+                "unit_raw": unit_raw,
+                "value_components": components,
+                "value_parsed": value.value_parsed,
+                "value_normalized": value.value_normalized,
+                "unit_normalized": value.unit_normalized,
+                "conversion_multiplier": value.conversion_multiplier,
+                "value_normalization_method": value.method,
+                "value_type": value_type,
+                "value_type_normalization_method": value_type_method,
+                "period_raw": candidate.period_raw,
+                **period,
+                "scope_raw": candidate.scope_raw,
+                "scope": scope,
+                "scope_normalization_method": scope_method,
+                "statement_raw": candidate.statement_raw,
+                "statement": statement,
+                "statement_normalization_method": statement_method,
+                "evidence_span": candidate.evidence_span,
+                "warning": value.warning,
+            }
+        )
+    return normalized
+
+
+def detect_metadata_conflicts(
+    metadata: dict[str, Any],
+    value_raw: str | None,
+    unit_raw: str | None,
+    value_components: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    """Record, but do not silently reconcile, source/metadata disagreements."""
+    conflicts: list[dict[str, Any]] = []
+    metadata_unit = first_metadata_value(metadata, "unit_raw", "unit")
+    if metadata_unit is not None and value_components:
+        metadata_token = normalize_unit_token(metadata_unit)
+        inline_units = {item["unit_canonical"] for item in value_components}
+        if metadata_token not in inline_units or len(inline_units) > 1:
+            conflicts.append(
+                {
+                    "field": "unit",
+                    "inline_value": unit_raw,
+                    "metadata_value": clean_text(metadata_unit),
+                    "resolution": "INLINE_EXPLICIT_PRIORITY",
+                }
+            )
+
+    metadata_value = first_metadata_value(metadata, "value_raw", "raw_value")
+    if (
+        metadata_value is not None
+        and value_raw is not None
+        and compact_key(metadata_value) != compact_key(value_raw)
+    ):
+        conflicts.append(
+            {
+                "field": "value_raw",
+                "inline_value": value_raw,
+                "metadata_value": clean_text(metadata_value),
+                "resolution": "INLINE_EXPLICIT_PRIORITY",
+            }
+        )
+    return conflicts
+
+
+def compare_known(left: Any, right: Any) -> bool | None:
+    if left is None or right is None:
+        return None
+    if left == "UNKNOWN" or right == "UNKNOWN":
+        return None
+    return left == right
+
+
+def deterministic_question_match(
+    record: dict[str, Any], question_anchor: dict[str, Any] | None
+) -> dict[str, bool | None]:
+    if not question_anchor:
+        return {"entity": None, "metric": None, "period": None, "scope": None}
+    period_left = (
+        record.get("period_start"),
+        record.get("period_end"),
+        record.get("period_type"),
+    )
+    period_right = (
+        question_anchor.get("period_start"),
+        question_anchor.get("period_end"),
+        question_anchor.get("period_type"),
+    )
+    period_match = (
+        None
+        if any(value in {None, "UNKNOWN"} for value in (*period_left, *period_right))
+        else period_left == period_right
+    )
+    return {
+        "entity": compare_known(
+            record.get("entity_key"), question_anchor.get("entity_key")
+        ),
+        "metric": compare_known(
+            record.get("metric_key"), question_anchor.get("metric_key")
+        ),
+        "period": period_match,
+        "scope": compare_known(record.get("scope"), question_anchor.get("scope")),
+    }
 
 
 def build_normalized_record(
@@ -1128,8 +1450,23 @@ def build_normalized_record(
     version, version_method = normalize_version(
         extraction.version_raw, extraction.version_canonical
     )
-    value = normalize_value_unit(
-        extraction.value_text_raw, extraction.value_raw, extraction.unit_raw
+    value_raw, unit_raw, value_components = resolve_raw_value_fields(
+        extraction.value_text_raw,
+        extraction.value_raw,
+        extraction.unit_raw,
+    )
+    value = normalize_value_unit(extraction.value_text_raw, value_raw, unit_raw)
+    value_type, value_type_method = normalize_value_type(
+        extraction.value_text_raw or extraction.evidence_span,
+        extraction.value_type,
+    )
+    candidate_claims = normalize_candidate_claims(extraction.candidate_claims)
+    source_currency_components = extract_value_components(raw_content)
+    field_conflicts = detect_metadata_conflicts(
+        source_metadata,
+        value_raw,
+        unit_raw,
+        value_components,
     )
 
     warnings = list(
@@ -1149,6 +1486,8 @@ def build_normalized_record(
         "entity_raw": extraction.entity_raw,
         "entity": entity,
         "entity_key": entity_key,
+        "entity_level": extraction.entity_level,
+        "parent_entity_raw": extraction.parent_entity_raw,
         "entity_basis": extraction.entity_basis,
         "entity_normalization_method": entity_method,
         "metric_raw": extraction.metric_raw,
@@ -1168,15 +1507,23 @@ def build_normalized_record(
         "statement_basis": extraction.statement_basis,
         "statement_normalization_method": statement_method,
         "value_text_raw": extraction.value_text_raw,
-        "value_raw": extraction.value_raw,
+        "value_raw_llm": extraction.value_raw,
+        "unit_raw_llm": extraction.unit_raw,
+        "value_raw": value_raw,
         "value_parsed": value.value_parsed,
-        "unit_raw": extraction.unit_raw,
+        "unit_raw": unit_raw,
+        "value_components": value_components,
         "value_normalized": value.value_normalized,
         "unit_normalized": value.unit_normalized,
         "conversion_multiplier": value.conversion_multiplier,
         "unit_dimension": value.unit_dimension,
         "value_basis": extraction.value_basis,
         "value_normalization_method": value.method,
+        "value_type": value_type,
+        "value_type_normalization_method": value_type_method,
+        "candidate_claims": candidate_claims,
+        "source_currency_components": source_currency_components,
+        "field_conflicts": field_conflicts,
         "version_raw": extraction.version_raw,
         "version": version,
         "version_basis": extraction.version_basis,
@@ -1205,6 +1552,7 @@ def build_normalized_record(
         "warnings": warnings,
         "llm_cache_hit": cache_hit,
     }
+    record["question_match"] = deterministic_question_match(record, question_anchor)
     validate_normalized_record(record)
     return record
 
@@ -1248,10 +1596,85 @@ def validate_normalized_record(record: dict[str, Any]) -> None:
 def safe_metadata_for_prompt(
     metadata: dict[str, Any], max_chars: int = 6000
 ) -> dict[str, Any]:
-    rendered = json.dumps(metadata, ensure_ascii=False, default=str)
+    """Keep high-value provenance fields instead of truncating JSON mid-object."""
+    priority_keys = (
+        "entity",
+        "company",
+        "corp_name",
+        "metric_raw",
+        "metric_path_raw",
+        "metric",
+        "metric_canonical",
+        "metric_norm",
+        "alignment_metric_key",
+        "value_raw",
+        "raw_value",
+        "unit_raw",
+        "unit",
+        "period_raw",
+        "period",
+        "period_year",
+        "source_report_year",
+        "scope",
+        "scope_raw",
+        "statement_type",
+        "statement",
+        "statement_raw",
+        "modality",
+        "source_file",
+        "page",
+        "page_number",
+        "bbox",
+        "section_path",
+        "column_header",
+        "table_id",
+        "row_id",
+        "filing_version",
+        "version",
+        "version_id",
+        "document_id",
+        "chunk_id",
+    )
+
+    def clipped_value(value: Any, limit: int = 1200) -> Any:
+        if isinstance(value, str):
+            return clip_text(value, limit)[0]
+        if isinstance(value, list):
+            return [clipped_value(item, 500) for item in value[:20]]
+        if isinstance(value, dict):
+            return {
+                clean_text(key): clipped_value(item, 700)
+                for key, item in list(value.items())[:30]
+            }
+        return value
+
+    projected = {
+        key: clipped_value(metadata[key])
+        for key in priority_keys
+        if key in metadata and metadata[key] is not None
+    }
+    vision = metadata.get("vision")
+    if isinstance(vision, dict):
+        vision_keys = (
+            "contains_answer_evidence",
+            "modalities",
+            "visual_evidence_text",
+            "rationale",
+        )
+        projected["vision"] = {
+            key: clipped_value(vision[key], 1800)
+            for key in vision_keys
+            if key in vision and vision[key] is not None
+        }
+
+    rendered = json.dumps(projected, ensure_ascii=False, default=str)
     if len(rendered) <= max_chars:
-        return metadata
-    return {"metadata_truncated": rendered[:max_chars]}
+        return projected
+    projected["metadata_projection_truncated"] = True
+    for key in list(projected):
+        if isinstance(projected[key], str):
+            projected[key] = clip_text(projected[key], 400)[0]
+    return projected
 
 
 def first_metadata_value(metadata: dict[str, Any], *keys: str) -> Any:
@@ -1260,6 +1683,62 @@ def first_metadata_value(metadata: dict[str, Any], *keys: str) -> Any:
         if value is not None and clean_text(value):
             return value
     return None
+
+
+def remove_question_inheritance(extraction: LLMExtraction) -> LLMExtraction:
+    """Evidence fields must be grounded in evidence, never copied from the query."""
+    data = extraction.model_dump()
+    cleared: list[str] = []
+    groups: tuple[tuple[str, tuple[str, ...]], ...] = (
+        (
+            "entity_basis",
+            (
+                "entity_raw",
+                "entity_canonical",
+                "entity_level",
+                "parent_entity_raw",
+            ),
+        ),
+        ("metric_basis", ("metric_raw", "metric_canonical")),
+        (
+            "period_basis",
+            (
+                "period_raw",
+                "period_start_hint",
+                "period_end_hint",
+                "period_precision",
+                "period_type",
+            ),
+        ),
+        ("scope_basis", ("scope_raw", "scope_canonical")),
+        ("statement_basis", ("statement_raw", "statement_canonical")),
+        (
+            "value_basis",
+            ("value_text_raw", "value_raw", "unit_raw", "value_type"),
+        ),
+        ("version_basis", ("version_raw", "version_canonical")),
+    )
+    enum_unknown = {
+        "period_precision",
+        "period_type",
+        "entity_level",
+        "scope_canonical",
+        "statement_canonical",
+        "value_type",
+        "version_canonical",
+    }
+    for basis_field, fields in groups:
+        if data.get(basis_field) != "QUESTION_INHERITED":
+            continue
+        for field in fields:
+            data[field] = "UNKNOWN" if field in enum_unknown else None
+        data[basis_field] = "UNKNOWN"
+        cleared.append(basis_field.removesuffix("_basis"))
+    if cleared:
+        data["warnings"] = list(data.get("warnings") or []) + [
+            "ungrounded question inheritance removed: " + ", ".join(cleared)
+        ]
+    return LLMExtraction.model_validate(data)
 
 
 def apply_metadata_fallback(
@@ -1285,6 +1764,9 @@ def apply_metadata_fallback(
     entity = first_metadata_value(metadata, "entity", "company", "corp_name")
     fill("entity_raw", entity, "entity_basis")
     fill("entity_canonical", entity)
+    if entity is not None and data.get("entity_level") == "UNKNOWN":
+        data["entity_level"] = "COMPANY"
+        applied.append("entity_level")
 
     metric_raw = first_metadata_value(
         metadata, "metric_raw", "metric_path_raw", "metric"
@@ -1334,12 +1816,183 @@ def apply_metadata_fallback(
         data["warnings"] = list(data.get("warnings") or []) + [
             "metadata fallback applied: " + ", ".join(sorted(set(applied)))
         ]
+    if (
+        data.get("extraction_status") == "NOT_FOUND"
+        and data.get("metric_raw") is not None
+        and data.get("value_raw") is not None
+    ):
+        data["extraction_status"] = "OK"
+        data["warnings"] = list(data.get("warnings") or []) + [
+            "extraction_status recovered from explicit parser metadata"
+        ]
+    return LLMExtraction.model_validate(data)
+
+
+FLOW_METRICS = {
+    "revenue",
+    "operating_profit",
+    "gross_profit",
+    "net_income",
+    "profit_before_tax",
+    "research_and_development",
+    "finance_income",
+    "finance_costs",
+    "income_tax_expense",
+}
+STOCK_METRICS = {
+    "total_assets",
+    "total_liabilities",
+    "total_equity",
+    "cash_and_cash_equivalents",
+    "inventories",
+    "trade_receivables",
+    "property_plant_equipment",
+    "intangible_assets",
+}
+
+
+def exact_metric_phrase(text: str, metric: str | None) -> str | None:
+    if not metric:
+        return None
+    lower = text.lower()
+    for alias in sorted(METRIC_ALIASES.get(metric, ()), key=len, reverse=True):
+        start = lower.find(alias.lower())
+        if start >= 0:
+            return text[start : start + len(alias)]
+    return None
+
+
+def exact_period_phrase(text: str) -> str | None:
+    for pattern in (DATE_YMD, QUARTER, DATE_YM, DATE_Y):
+        match = pattern.search(text)
+        if match:
+            return match.group(0)
+    return None
+
+
+def apply_question_fallback(
+    extraction: LLMExtraction,
+    question: str,
+    evidence_inputs: list[dict[str, Any]],
+) -> LLMExtraction:
+    """Recover explicit query slots deterministically when a small model misses them."""
+    data = extraction.model_dump()
+    applied: list[str] = []
+    question_key = compact_key(question)
+
+    if data.get("entity_raw") is None:
+        candidates: set[str] = set()
+        for evidence in evidence_inputs:
+            metadata = evidence.get("metadata") or {}
+            entity = first_metadata_value(metadata, "entity", "company", "corp_name")
+            if entity is not None:
+                candidates.add(clean_text(entity))
+            source_file = clean_text(metadata.get("source_file"))
+            bracketed = re.search(r"\[([^\]]+)\]", source_file)
+            if bracketed:
+                candidates.add(clean_text(bracketed.group(1)))
+        for entity in sorted(candidates, key=len, reverse=True):
+            if compact_key(entity) and compact_key(entity) in question_key:
+                data["entity_raw"] = entity
+                data["entity_canonical"] = entity
+                data["entity_level"] = "COMPANY"
+                data["entity_basis"] = "METADATA"
+                applied.append("entity")
+                break
+    if data.get("entity_raw") is not None and data.get("entity_level") == "UNKNOWN":
+        data["entity_level"] = "COMPANY"
+        applied.append("entity_level")
+
+    canonical_metric = canonical_metric_from_text(question)
+    if data.get("metric_raw") is None and canonical_metric:
+        data["metric_raw"] = exact_metric_phrase(question, canonical_metric)
+        data["metric_basis"] = "EXPLICIT"
+        applied.append("metric_raw")
+    if data.get("metric_canonical") is None and canonical_metric:
+        data["metric_canonical"] = canonical_metric
+        applied.append("metric_canonical")
+
+    period_raw = exact_period_phrase(question)
+    if data.get("period_raw") is None and period_raw:
+        data["period_raw"] = period_raw
+        data["period_basis"] = "EXPLICIT"
+        applied.append("period")
+    if period_raw and data.get("period_start_hint") is None:
+        normalized = normalize_period(period_raw, None, None, "UNKNOWN", "UNKNOWN")
+        start = normalized["period_start"]
+        end = normalized["period_end"]
+        data["period_start_hint"] = start.replace("_", "-") if start else None
+        data["period_end_hint"] = end.replace("_", "-") if end else None
+        data["period_precision"] = normalized["period_precision"]
+
+    if data.get("scope_raw") is None:
+        scope_match = re.search(
+            r"연결(?:재무제표)?|별도(?:재무제표)?|개별(?:재무제표)?|consolidated|separate|standalone",
+            question,
+            re.IGNORECASE,
+        )
+        if scope_match:
+            data["scope_raw"] = scope_match.group(0)
+            data["scope_canonical"] = normalize_scope(scope_match.group(0), "UNKNOWN")[
+                0
+            ]
+            data["scope_basis"] = "EXPLICIT"
+            applied.append("scope")
+
+    metric = data.get("metric_canonical") or canonical_metric
+    if metric in FLOW_METRICS:
+        data["period_type"] = "DURATION"
+    elif metric in STOCK_METRICS:
+        data["period_type"] = "POINT_IN_TIME"
+
+    identified = any(
+        data.get(field) is not None
+        for field in ("entity_raw", "metric_raw", "period_raw", "scope_raw")
+    )
+    if identified and data.get("extraction_status") == "NOT_FOUND":
+        data["extraction_status"] = "OK"
+        applied.append("extraction_status")
+    if applied:
+        data["warnings"] = list(data.get("warnings") or []) + [
+            "deterministic question fallback applied: " + ", ".join(applied)
+        ]
+    return LLMExtraction.model_validate(data)
+
+
+def enforce_evidence_primary_consistency(
+    extraction: LLMExtraction,
+    question_record: dict[str, Any],
+) -> LLMExtraction:
+    """Do not promote one segment when a company-level query has many choices."""
+    if not (
+        question_record.get("entity_level") == "COMPANY"
+        and extraction.entity_level == "SEGMENT"
+        and len(extraction.candidate_claims) >= 2
+    ):
+        return extraction
+
+    data = extraction.model_dump()
+    data.update(
+        {
+            "extraction_status": "AMBIGUOUS",
+            "value_text_raw": None,
+            "value_raw": None,
+            "unit_raw": None,
+            "value_type": "UNKNOWN",
+            "value_basis": "UNKNOWN",
+        }
+    )
+    data["warnings"] = list(data.get("warnings") or []) + [
+        "company-level query has multiple segment claims but no company total; "
+        "primary value cleared"
+    ]
     return LLMExtraction.model_validate(data)
 
 
 def structure_question(
     client: Any,
     question: str,
+    evidence_inputs: list[dict[str, Any]],
     args: argparse.Namespace,
 ) -> tuple[dict[str, Any], bool]:
     clipped, truncated = clip_text(question, args.max_question_chars)
@@ -1353,6 +2006,7 @@ def structure_question(
         max_attempts=args.max_attempts,
         max_output_tokens=args.max_output_tokens,
     )
+    extraction = apply_question_fallback(extraction, question, evidence_inputs)
     record = build_normalized_record(
         record_id="Q001",
         record_type="question",
@@ -1412,7 +2066,9 @@ def structure_one_evidence(
         max_attempts=args.max_attempts,
         max_output_tokens=args.max_output_tokens,
     )
+    extraction = remove_question_inheritance(extraction)
     extraction = apply_metadata_fallback(extraction, evidence["metadata"])
+    extraction = enforce_evidence_primary_consistency(extraction, question_record)
     record = build_normalized_record(
         record_id=evidence["evidence_id"],
         record_type="evidence",
@@ -1436,15 +2092,48 @@ NORMALIZATION_SCHEMA = {
     "stage": "04_semantic_normalization",
     "core_fields": {
         "entity": "Canonical entity name; entity_key is used for equality/grouping.",
+        "entity_level": ["COMPANY", "SUBSIDIARY", "SEGMENT", "UNKNOWN"],
+        "parent_entity_raw": "Parent company for a segment/subsidiary when explicit.",
         "metric": "Canonical metric; metric_key is used for equality/grouping.",
         "period_start": "YYYY, YYYY_MM, YYYY_MM_DD, or YYYY_Qn.",
         "period_end": "Same precision convention as period_start.",
-        "scope": ["CFS", "OFS", "SEGMENT", "ENTITY_ONLY", "UNKNOWN"],
-        "statement": ["BS", "IS", "CIS", "CF", "SCE", "NON_FINANCIAL", "UNKNOWN"],
-        "value_raw": "Exact raw numeric token preserved as string.",
-        "unit_raw": "Exact raw unit token preserved as string.",
+        "scope": ["CFS", "OFS", "ENTITY_ONLY", "UNKNOWN"],
+        "statement": [
+            "BS",
+            "IS",
+            "CIS",
+            "CF",
+            "SCE",
+            "NOTE",
+            "SUMMARY_FINANCIAL",
+            "BUSINESS",
+            "MDA",
+            "SUSTAINABILITY",
+            "OTHER",
+            "UNKNOWN",
+        ],
+        "value_text_raw": "Exact source phrase containing the selected value.",
+        "value_raw": (
+            "Exact raw value expression. Compound values retain every component, "
+            "e.g. '12조 8,527억원'."
+        ),
+        "unit_raw": "Exact raw unit(s); compound values use e.g. '조원+억원'.",
+        "value_components": (
+            "Ordered components with raw number/unit and per-component KRW value."
+        ),
         "value_normalized": "Decimal string after deterministic unit conversion.",
         "unit_normalized": "Canonical comparison unit such as KRW or ratio.",
+        "value_type": [
+            "ABSOLUTE",
+            "CHANGE",
+            "RATIO",
+            "PERCENTAGE_POINT",
+            "RANGE",
+            "FORECAST",
+            "UNKNOWN",
+        ],
+        "candidate_claims": "All visible alternatives when primary selection is ambiguous.",
+        "field_conflicts": "Inline-vs-metadata disagreements and their resolution rule.",
     },
     "grouping_key": ["entity_key", "metric_key"],
     "semantic_condition_key": [
@@ -1502,6 +2191,50 @@ def assert_equal(actual: Any, expected: Any, label: str) -> None:
         raise AssertionError(f"{label}: expected={expected!r}, actual={actual!r}")
 
 
+def make_test_extraction(**overrides: Any) -> LLMExtraction:
+    data: dict[str, Any] = {
+        "extraction_status": "NOT_FOUND",
+        "entity_raw": None,
+        "entity_canonical": None,
+        "entity_level": "UNKNOWN",
+        "parent_entity_raw": None,
+        "entity_basis": "UNKNOWN",
+        "metric_raw": None,
+        "metric_canonical": None,
+        "metric_basis": "UNKNOWN",
+        "period_raw": None,
+        "period_start_hint": None,
+        "period_end_hint": None,
+        "period_precision": "UNKNOWN",
+        "period_type": "UNKNOWN",
+        "period_basis": "UNKNOWN",
+        "scope_raw": None,
+        "scope_canonical": "UNKNOWN",
+        "scope_basis": "UNKNOWN",
+        "statement_raw": None,
+        "statement_canonical": "UNKNOWN",
+        "statement_basis": "UNKNOWN",
+        "value_text_raw": None,
+        "value_raw": None,
+        "unit_raw": None,
+        "value_type": "UNKNOWN",
+        "candidate_claims": [],
+        "value_basis": "UNKNOWN",
+        "version_raw": None,
+        "version_canonical": "UNKNOWN",
+        "version_basis": "UNKNOWN",
+        "evidence_span": None,
+        "entity_matches_question": None,
+        "metric_matches_question": None,
+        "period_matches_question": None,
+        "scope_matches_question": None,
+        "confidence": 0.5,
+        "warnings": [],
+    }
+    data.update(overrides)
+    return LLMExtraction.model_validate(data)
+
+
 def run_self_test() -> None:
     cases = [
         ("1,200억 원", "1,200", "억원", "120000000000", "KRW"),
@@ -1541,7 +2274,60 @@ def run_self_test() -> None:
     assert_equal(unit_only.value_normalized, None, "unit_only_value")
     assert_equal(unit_only.unit_normalized, "ratio", "unit_only_unit")
 
-    print("[SELF-TEST SUCCESS] Unit/Value, Period, Scope, Metric normalization")
+    raw_value, raw_unit, components = resolve_raw_value_fields(
+        "12조 8,527억원", "8,527", "억원"
+    )
+    assert_equal(raw_value, "12조 8,527억원", "compound_raw_value")
+    assert_equal(raw_unit, "조원+억원", "compound_raw_unit")
+    assert_equal(len(components), 2, "compound_component_count")
+    assert_equal(
+        normalize_value_unit("12조 8,527억원", raw_value, raw_unit).value_normalized,
+        "12852700000000",
+        "compound_normalized_value",
+    )
+
+    inline_priority = normalize_value_unit("전년 대비 1조 증가", "1", "백만원")
+    assert_equal(
+        inline_priority.value_normalized,
+        "1000000000000",
+        "inline_unit_priority",
+    )
+    assert_equal(inline_priority.method, "INLINE_KRW_RULE", "inline_unit_method")
+    assert_equal(
+        normalize_value_type("전년 대비 1조 증가", "ABSOLUTE")[0],
+        "CHANGE",
+        "change_value_type",
+    )
+
+    inherited = make_test_extraction(
+        scope_raw="연결",
+        scope_canonical="CFS",
+        scope_basis="QUESTION_INHERITED",
+    )
+    cleared = remove_question_inheritance(inherited)
+    assert_equal(cleared.scope_raw, None, "inherited_scope_raw")
+    assert_equal(cleared.scope_canonical, "UNKNOWN", "inherited_scope_code")
+
+    question = apply_question_fallback(
+        make_test_extraction(),
+        "2025년 연결 기준 삼성전자 영업이익은?",
+        [
+            {
+                "metadata": {
+                    "entity": "삼성전자",
+                    "source_file": "[삼성전자]사업보고서.pdf",
+                }
+            }
+        ],
+    )
+    assert_equal(question.extraction_status, "OK", "question_status")
+    assert_equal(question.entity_raw, "삼성전자", "question_entity")
+    assert_equal(question.metric_canonical, "operating_profit", "question_metric")
+    assert_equal(question.period_raw, "2025년", "question_period")
+    assert_equal(question.scope_canonical, "CFS", "question_scope")
+    assert_equal(question.period_type, "DURATION", "question_period_type")
+
+    print("[SELF-TEST SUCCESS] Unit/Value, Period, Scope, Metric, grounding safeguards")
 
 
 # ==============================================================================
@@ -1630,7 +2416,7 @@ def main() -> None:
     client = OpenAI(timeout=args.timeout, max_retries=0)
 
     print("[1/2] Structuring question...")
-    question_record, _ = structure_question(client, question, args)
+    question_record, _ = structure_question(client, question, evidence_inputs, args)
 
     print(f"[2/2] Structuring {len(evidence_inputs)} evidence items...")
     by_rank: dict[int, dict[str, Any]] = {}
@@ -1700,7 +2486,8 @@ def main() -> None:
     print(f"Records : {records_path}")
     print(f"Schema  : {schema_path}")
     print(f"Summary : {summary_path}")
-    print("Conflict detection/filtering was intentionally NOT applied in Stage 04.")
+    print("[INFO] Stage 04는 구조화·정규화 전용입니다.")
+    print("[INFO] Conflict detection/filtering은 다음 단계에서 수행합니다.")
 
 
 if __name__ == "__main__":
