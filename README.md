@@ -43,6 +43,126 @@ CAUSE-RAG는 텍스트·표·페이지 이미지에서 얻은 근거를 공통 �
 
 원본 PDF는 스크립트와 같은 디렉터리 아래의 `pdf_data/`에 배치합니다. 기본 입력·출력 경로는 각 스크립트의 위치를 기준으로 결정됩니다.
 
+### 3.1 코드·데이터·결과 파일 구조
+
+아래는 기본 경로로 실행했을 때의 구성입니다. `dataset/`의 파일은 해당 단계를 실행한 후 생성되며, `<...>`는 실제 문서명·ID·해시 등으로 바뀌는 부분입니다. PDF 파일명은 예시 패턴이며 코드에서 강제하는 이름은 아닙니다.
+
+```text
+CAUSE-RAG/
+├─ README.md                              # 프로젝트 소개, 파일 구성 및 실행 방법
+├─ 01_parse_audit_reports.py               # PDF 본문·표 추출 및 표 품질 진단
+├─ 02_structure_evidence.py               # 전체 파싱 결과의 근거 구조화 및 DART 정렬 후보 생성
+├─ 03_build_dart_gold.py                   # OpenDART 대조와 수동 검증을 통한 Gold 구축
+├─ 04_normalize_retrieved_evidence.py      # 질문·검색 근거의 LLM 구조화 및 규칙 기반 정규화
+├─ 05_retrieve_evidence.py                 # 근거·페이지 검색, 비전 재순위화 및 04 자동 호출
+├─ pdf_data/                              # 사용자가 준비하는 원본 사업보고서 PDF
+│  └─ <사업보고서>.pdf                     # 기업·사업연도별 원본 문서
+└─ dataset/                               # 단계별 중간 데이터와 최종 산출물
+   ├─ 01_parsed/                          # 01의 PDF 파싱 결과
+   │  ├─ parsed_blocks.jsonl              # 텍스트·표 블록과 페이지·좌표·품질 정보
+   │  ├─ document_manifest.csv            # 문서별 기업·사업연도 및 파싱 메타데이터
+   │  ├─ dataset_manifest.json            # 전체 데이터셋 구성과 파싱 설정·통계
+   │  ├─ table_candidates.csv             # 여러 표 추출 방식에서 생성된 후보 진단 정보
+   │  ├─ table_qc.csv                     # 선택된 표의 품질 점검 결과와 검수 우선순위
+   │  ├─ page_text_qc.csv                 # 페이지별 본문 텍스트 추출 품질 진단
+   │  ├─ multipage_table_groups.csv       # 여러 페이지에 걸친 표의 연결 그룹 정보
+   │  ├─ tables/                         # 선택된 표를 개별 파일로 저장
+   │  │  └─ <기업명>_<사업연도>/          # 기업·사업연도별 표 저장 폴더
+   │  │     ├─ table_<번호>_p<페이지>.csv  # 표의 행·열 데이터를 CSV로 저장
+   │  │     ├─ table_<번호>_p<페이지>.html # 표를 브라우저에서 확인하는 HTML 표현
+   │  │     └─ table_<번호>_p<페이지>.md   # 표를 텍스트로 확인하는 Markdown 표현
+   │  ├─ raw_text/                       # 문서별 추출 원문 텍스트
+   │  │  └─ <PDF파일명>.txt               # PDF 확장자를 제외한 이름으로 저장한 텍스트
+   │  └─ debug_pdf/                      # --save-debug-pdfs 사용 시 생성
+   │     └─ <기업명>_<연도>_table_debug.pdf # 선택된 표 영역을 표시한 검수용 PDF
+   ├─ 02_structured/                     # 02의 전체 코퍼스 근거 구조화 결과
+   │  ├─ structured_evidence.jsonl        # 05 검색 인덱스 구축에 사용하는 전체 근거
+   │  ├─ structured_evidence.csv          # 전체 구조화 근거를 검토하기 위한 CSV
+   │  ├─ financial_structured_evidence.csv # 재무 근거를 분리한 결과
+   │  ├─ nonfinancial_structured_evidence.csv # 비재무 근거를 분리한 결과
+   │  ├─ dart_alignment_candidates.csv    # 03에서 OpenDART와 정렬할 재무제표 표 근거
+   │  ├─ manual_review_candidates.csv     # 파싱·구조화 결과 중 수동 확인이 필요한 근거
+   │  ├─ table_structure_diagnostics.csv  # 표 헤더·기간 등 구조 해석의 진단 결과
+   │  ├─ evidence_schema.json             # 02의 근거 필드와 스키마 정의
+   │  └─ structuring_summary.json         # 근거 수·유형·누락 필드 등 구조화 요약
+   ├─ 03_dart_gold/                       # 03의 평가용 참조·정렬·Gold 데이터
+   │  ├─ raw_api/                        # OpenDART 응답 캐시와 공시 진단 자료
+   │  │  ├─ corp_codes/                  # 기업 고유번호 매핑 데이터 저장 폴더
+   │  │  │  └─ corp_codes.csv            # 종목코드와 DART 기업 고유번호 매핑
+   │  │  ├─ disclosures/                 # 정확한 공시 식별에 사용하는 공시 목록 응답
+   │  │  ├─ financial/                   # 연결·별도 재무제표 API 응답
+   │  │  └─ exact_xbrl_on_mismatch/       # 공시 버전 불일치 시 진단용 XBRL 자료
+   │  ├─ exact_filing_manifest.csv        # PDF별로 대응하는 공시와 접수번호 확인 결과
+   │  ├─ dart_reference_evidence.jsonl    # OpenDART 재무 데이터 기반 참조 근거
+   │  ├─ dart_reference_evidence.csv      # 참조 근거를 확인하기 위한 CSV
+   │  ├─ dart_pdf_alignment.csv           # DART 참조와 PDF 근거의 정렬·수치 비교 결과
+   │  ├─ gold_review_template.csv         # manual_verified 등을 기록하는 수동 검수 파일
+   │  ├─ review_queue.csv                 # 검수 우선순위에 따라 정렬한 확인 대상
+   │  ├─ version_mismatch.csv             # PDF와 API 응답의 공시 버전 불일치 내역
+   │  ├─ gold_evidence.jsonl              # --finalize 후 확정한 수동 검증 Gold 근거
+   │  ├─ gold_evidence.csv                # 확정된 Gold 근거의 CSV 표현
+   │  ├─ gold_core.csv                    # 확정된 Gold의 핵심 필드 모음
+   │  └─ gold_manifest.json               # Gold 구축 또는 확정 단계의 상태·통계
+   ├─ 04_normalized/                      # 04의 질문 및 검색 근거 정규화 결과
+   │  ├─ normalized_bundle.json           # 질문·근거·요약·후속 단계 계약을 담은 통합 결과
+   │  ├─ normalized_records.jsonl         # 정규화된 질문과 각 근거를 행 단위로 저장
+   │  ├─ normalization_schema.json        # 정규화 필드와 비교 키의 스키마 정의
+   │  ├─ normalization_summary.json       # 정규화 처리 결과의 요약 통계
+   │  └─ cache/                          # LLM 의미 추출 결과를 재사용하는 캐시
+   │     └─ <캐시키>.json                 # 요청 내용·모델·프롬프트 등에 대응하는 추출 결과
+   └─ 05_retrieval/                       # 05의 검색 인덱스와 질문별 검색 결과
+      ├─ cause_rag_multimodal.db          # 근거·PDF 페이지·임베딩을 저장한 SQLite DB
+      ├─ retrieval_input.json             # 04로 전달하는 원문 질문과 Top-K 근거
+      ├─ multimodal_context.json          # 검색 근거와 페이지·크롭 이미지 경로를 묶은 문맥
+      ├─ retrieval_diagnostics.json       # 인덱스 구축 및 검색 과정의 진단 정보
+      └─ page_images/                     # 검색 과정에서 렌더링한 페이지·근거 이미지
+         └─ <document_id>/                # 원본 문서별 이미지 저장 폴더
+            ├─ page_<페이지>_<해시>.jpg   # 원본 PDF 페이지 전체를 렌더링한 이미지
+            └─ crop_<페이지>_<해시>.jpg   # bbox가 있는 근거의 영역을 잘라낸 이미지
+```
+
+03의 파일은 실행 결과에 따라 일부만 생성될 수 있습니다. 최종 Gold 파일은 수동 검증 후 `--finalize`를 실행해야 생성됩니다. 04의 캐시는 `--no-cache` 사용 시 저장하지 않으며, 05의 크롭 이미지는 유효한 bbox가 있는 경우 생성됩니다. 기본 Top-K는 5입니다.
+
+### 3.2 SQLite 검색 인덱스 내부 구성
+
+아래 항목은 별도 파일이 아니라 `dataset/05_retrieval/cause_rag_multimodal.db` 내부 테이블과 컬럼입니다. JSON 목록·메타데이터는 TEXT 컬럼에, 임베딩 벡터는 BLOB 컬럼에 저장합니다.
+
+```text
+cause_rag_multimodal.db                    # 05에서 구축하고 재사용하는 SQLite 검색 DB
+├─ evidence_index                         # 구조화된 개별 근거를 저장하는 테이블
+│  ├─ evidence_id                         # 근거 고유 ID이자 기본키
+│  ├─ raw_content                         # 근거 원문
+│  ├─ retrieval_text / tokens_json        # 검색용 텍스트와 BM25용 토큰 목록
+│  ├─ modality                            # 텍스트·표 등 근거 유형
+│  ├─ entity                              # 근거가 설명하는 기업
+│  ├─ metric_raw / metric_canonical       # 원문 지표명과 정규화 지표명
+│  ├─ period_raw / period_year            # 원문 기간 표현과 측정 연도
+│  ├─ scope / statement / version         # 연결·별도 범위, 재무제표 종류, 버전 정보
+│  ├─ document_id / source_file           # 원본 문서 ID와 파일명
+│  ├─ page / bbox_json / pdf_path         # 페이지 번호, 근거 영역 좌표, 원본 PDF 경로
+│  ├─ metadata_json / source_path         # 추가 근거 메타데이터와 입력 데이터 파일 경로
+│  ├─ embedding                           # 근거의 임베딩 벡터
+│  ├─ embedding_model / embedding_dim    # 임베딩 모델명과 벡터 차원
+│  └─ content_hash / updated_at           # 내용 변경 확인용 해시와 갱신 시각
+├─ page_index                             # 원본 PDF의 페이지를 저장하는 테이블
+│  ├─ page_id / document_id               # 페이지 고유 ID와 원본 문서 ID
+│  ├─ entity / source_file                # 기업명과 원본 PDF 파일명
+│  ├─ pdf_path / page                     # PDF 경로와 페이지 번호
+│  ├─ native_text                         # 원본 PDF에서 직접 추출한 페이지 텍스트
+│  ├─ retrieval_text / tokens_json        # 페이지 검색용 텍스트와 BM25용 토큰 목록
+│  ├─ linked_ids_json                     # 해당 페이지에 연결된 evidence_id 목록
+│  ├─ metadata_json                       # 페이지 관련 추가 메타데이터
+│  ├─ embedding                           # 페이지 검색용 텍스트의 임베딩 벡터
+│  ├─ embedding_model / embedding_dim    # 임베딩 모델명과 벡터 차원
+│  └─ pdf_sha256 / content_hash / updated_at # 원본·내용 변경 확인 및 갱신 정보
+└─ index_meta                             # 검색 인덱스의 공통 설정·상태 테이블
+   ├─ db_version / schema_version         # DB 구조와 검색 스키마 버전
+   ├─ embedding_model / embedding_dim    # 인덱스에서 사용하는 임베딩 설정
+   └─ state                               # 인덱스 구축 상태: building / ready / failed
+```
+
+`index_meta`의 실제 컬럼은 `key`, `value`이며, 위 하위 항목들은 `key`에 저장되는 설정 이름입니다. `page_index`의 벡터는 페이지 이미지가 아니라 **페이지 검색용 텍스트의 임베딩**입니다. 이미지는 JPG 파일로 별도 저장하고, 후보 페이지의 관련성은 비전 모델로 재평가합니다. `linked_ids_json`은 ID 목록을 저장한 JSON으로, 별도 연결 테이블이나 외래키 제약은 아닙니다.
+
 ## 4. 파이프라인
 
 파일 번호와 실제 실행 순서는 다릅니다. **검색·정규화 경로는 `01 → 02 → 05 → 04`**, Gold 구축 경로는 `01·02 → 03 → 수동 검증 → 03 --finalize`입니다.
@@ -200,27 +320,4 @@ LLM은 의미 추출을 담당하고, 수치·단위 산술 변환은 Python `De
 ## 9. 구현 범위와 후속 연구
 
 - 현재 구현: 네이티브 PDF 텍스트·표 추출, 구조화, 검수 기반 Gold 구축, 페이지 이미지 기반 검색 재순위화, 검색 근거 정규화.
-- 후속 구현: Apparent/Genuine Conflict 판정, 충돌 원인 분류, 근거 신뢰도 추정 및 조정, 최종 답변 생성·보류.
-- 현재 한계: OCR 미지원, 독립적인 차트 수치 추출 모듈 미포함, 입력 문서의 구조와 추출 품질에 따른 오류 가능성.
-
-04 실행 후 `Conflict detection/filtering was intentionally NOT applied in Stage 04.`가 출력되는 것은 해당 단계가 구조화·정규화까지만 수행한다는 안내입니다.
-
-성능 수치와 실험 결과는 이 README에 포함하지 않았습니다. 후속 실험에서는 Gold 구축 이력, 모델·패키지 버전, 검색 설정, 정규화 오류, 충돌 판정 및 답변 품질을 함께 기록합니다.
-
-## 10. 저장소 관리
-
-API 키와 로컬 실행 산출물을 실수로 커밋하지 않도록 다음 `.gitignore` 구성을 사용할 수 있습니다. 데이터 공개 범위가 정해지면 필요한 검증 데이터만 별도로 관리합니다.
-
-```gitignore
-.venv/
-__pycache__/
-*.py[cod]
-.env
-.env.*
-!.env.example
-dart_api_key.txt
-pdf_data/
-dataset/
-```
-
-**연구팀: RAGON**
+- 후속 구현: Apparent/Genuine Conflict 판정, 충돌 원인 분류, 근거 신뢰도 추정 및 조정, 최종 답변 생성.
