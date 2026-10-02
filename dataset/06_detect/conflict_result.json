@@ -1,0 +1,1110 @@
+{
+  "overall_status": "apparent_conflict",
+  "question": {
+    "raw_question": "2025년 연결 기준 삼성전자의 영업이익은?",
+    "compare_fields": {
+      "entity": "Samsung Electronics",
+      "metric": "operating_profit",
+      "period_start": "2025",
+      "period_end": "2025",
+      "period_type": "DURATION",
+      "scope": "CFS",
+      "unit_normalized": null,
+      "value_normalized": null
+    }
+  },
+  "summary": {
+    "no_conflict_count": 0,
+    "apparent_conflict_count": 4,
+    "genuine_conflict_count": 1,
+    "scope_unresolved_count": 1,
+    "revivable_evidence_ids": [
+      "ev_dc3b40e12b9cda3a"
+    ]
+  },
+  "evidence_comparison": {
+    "group_status": "apparent_conflict",
+    "by_key": {
+      "period_start": {
+        "all_same": true,
+        "groups": {
+          "2025": [
+            "ev_e14c1da11d44bb2a",
+            "ev_fd7851ca79a35284",
+            "ev_200753b9d9f05421",
+            "ev_8a010dfb4d8d0bff"
+          ]
+        }
+      },
+      "period_end": {
+        "all_same": true,
+        "groups": {
+          "2025": [
+            "ev_e14c1da11d44bb2a",
+            "ev_fd7851ca79a35284",
+            "ev_200753b9d9f05421",
+            "ev_8a010dfb4d8d0bff"
+          ]
+        }
+      },
+      "period_type": {
+        "all_same": true,
+        "groups": {
+          "DURATION": [
+            "ev_e14c1da11d44bb2a",
+            "ev_fd7851ca79a35284",
+            "ev_200753b9d9f05421",
+            "ev_8a010dfb4d8d0bff"
+          ]
+        }
+      },
+      "scope": {
+        "all_same": true,
+        "groups": {
+          "CFS": [
+            "ev_e14c1da11d44bb2a",
+            "ev_fd7851ca79a35284",
+            "ev_200753b9d9f05421",
+            "ev_8a010dfb4d8d0bff"
+          ]
+        }
+      },
+      "unit_normalized": {
+        "all_same": true,
+        "groups": {
+          "KRW": [
+            "ev_e14c1da11d44bb2a",
+            "ev_fd7851ca79a35284",
+            "ev_200753b9d9f05421",
+            "ev_8a010dfb4d8d0bff"
+          ]
+        }
+      },
+      "value_normalized": {
+        "all_same": false,
+        "groups": {
+          "12852700000000": [
+            "ev_e14c1da11d44bb2a"
+          ],
+          "5566500000000": [
+            "ev_fd7851ca79a35284"
+          ],
+          "3733400000000": [
+            "ev_200753b9d9f05421"
+          ],
+          "1000000000000": [
+            "ev_8a010dfb4d8d0bff"
+          ]
+        }
+      }
+    }
+  },
+  "no_conflict": [],
+  "apparent_conflict": [
+    {
+      "evidence_id": "ev_e14c1da11d44bb2a",
+      "conflict_label": "apparent_conflict",
+      "checked_keys": [
+        "entity",
+        "metric",
+        "period_start",
+        "period_end",
+        "period_type",
+        "scope"
+      ],
+      "skipped_keys": [
+        "unit_normalized",
+        "value_normalized"
+      ],
+      "mismatched_keys": [],
+      "exclusion_reasons": [],
+      "revivable_if_scope_resolved": false,
+      "comparison": [
+        {
+          "key": "entity",
+          "question": "Samsung Electronics",
+          "evidence": "Samsung Electronics",
+          "result": "match"
+        },
+        {
+          "key": "metric",
+          "question": "operating_profit",
+          "evidence": "operating_profit",
+          "result": "match"
+        },
+        {
+          "key": "period_start",
+          "question": "2025",
+          "evidence": "2025",
+          "result": "match",
+          "rule": "containment"
+        },
+        {
+          "key": "period_end",
+          "question": "2025",
+          "evidence": "2025",
+          "result": "match",
+          "rule": "containment"
+        },
+        {
+          "key": "period_type",
+          "question": "DURATION",
+          "evidence": "DURATION",
+          "result": "match"
+        },
+        {
+          "key": "scope",
+          "question": "CFS",
+          "evidence": "CFS",
+          "result": "match"
+        },
+        {
+          "key": "unit_normalized",
+          "question": null,
+          "evidence": "KRW",
+          "result": "skipped"
+        },
+        {
+          "key": "value_normalized",
+          "question": null,
+          "evidence": "12852700000000",
+          "result": "skipped"
+        }
+      ],
+      "structured": {
+        "entity": "Samsung Electronics",
+        "metric": "operating_profit",
+        "period_start": "2025",
+        "period_end": "2025",
+        "period_type": "DURATION",
+        "scope": "CFS",
+        "unit_normalized": "KRW",
+        "value_normalized": "12852700000000"
+      },
+      "raw_text": "라. 사업부문별 요약 재무 현황 2025년(제57기) 매출은 DX 부문이 187조 9,673억원(56.3%), DS 부문이 130조 1,282억원 (39%)이며, SDC가 29조 8,417억원(8.9%), Harman은 15조 7,833억원(4.7%)입니다. 2025년(제57기) 영업이익은 DX 부문이 12조 8,527억원, DS 부문이 24조 8,581억원, SDC가 4조 1,163억원, 그리고 Harman은 1조 5,311억원입니다.",
+      "rag": {
+        "evidence_id": "ev_e14c1da11d44bb2a",
+        "record_id": "ev_e14c1da11d44bb2a",
+        "raw_content": "라. 사업부문별 요약 재무 현황 2025년(제57기) 매출은 DX 부문이 187조 9,673억원(56.3%), DS 부문이 130조 1,282억원 (39%)이며, SDC가 29조 8,417억원(8.9%), Harman은 15조 7,833억원(4.7%)입니다. 2025년(제57기) 영업이익은 DX 부문이 12조 8,527억원, DS 부문이 24조 8,581억원, SDC가 4조 1,163억원, 그리고 Harman은 1조 5,311억원입니다.",
+        "document_id": "doc_e73a0d051a397bdc",
+        "source_file": "[삼성전자]사업보고서(2026.03.10).pdf",
+        "evidence_crop_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\dataset\\05_retrieval\\page_images\\pdf_2a23f2304139e64e3f15c4ab\\crop_0080_54dce18396.jpg",
+        "page_image_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\dataset\\05_retrieval\\page_images\\pdf_2a23f2304139e64e3f15c4ab\\page_0080_c60c702054.jpg",
+        "pdf_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\pdf_data\\[삼성전자]사업보고서(2026.03.10).pdf",
+        "page": 80
+      },
+      "extra": {
+        "statement_type": "BUSINESS",
+        "filing_date": "2026-03-10",
+        "source_report_year": 2025,
+        "version": "original",
+        "version_id": "삼성전자_2025_2026-03-10_original",
+        "major_section": "II. 사업의 내용",
+        "section_path": [
+          "(2) 매출유형별 매출실적",
+          "(3) 주요 지역별 매출 현황",
+          "(2) 해외",
+          "(3) 판매경로별 매출액 비중",
+          "(2) 해외",
+          "5. 위험관리 및 파생거래",
+          "[△는 부(-)의 값임]",
+          "가. 경영상의 주요 계약 등",
+          "[△는 부(-)의 값임]",
+          "7. 기타 참고사항"
+        ],
+        "page": 80
+      }
+    },
+    {
+      "evidence_id": "ev_fd7851ca79a35284",
+      "conflict_label": "apparent_conflict",
+      "checked_keys": [
+        "entity",
+        "metric",
+        "period_start",
+        "period_end",
+        "period_type",
+        "scope"
+      ],
+      "skipped_keys": [
+        "unit_normalized",
+        "value_normalized"
+      ],
+      "mismatched_keys": [],
+      "exclusion_reasons": [],
+      "revivable_if_scope_resolved": false,
+      "comparison": [
+        {
+          "key": "entity",
+          "question": "Samsung Electronics",
+          "evidence": "Samsung Electronics",
+          "result": "match"
+        },
+        {
+          "key": "metric",
+          "question": "operating_profit",
+          "evidence": "operating_profit",
+          "result": "match"
+        },
+        {
+          "key": "period_start",
+          "question": "2025",
+          "evidence": "2025",
+          "result": "match",
+          "rule": "containment"
+        },
+        {
+          "key": "period_end",
+          "question": "2025",
+          "evidence": "2025",
+          "result": "match",
+          "rule": "containment"
+        },
+        {
+          "key": "period_type",
+          "question": "DURATION",
+          "evidence": "DURATION",
+          "result": "match"
+        },
+        {
+          "key": "scope",
+          "question": "CFS",
+          "evidence": "CFS",
+          "result": "match"
+        },
+        {
+          "key": "unit_normalized",
+          "question": null,
+          "evidence": "KRW",
+          "result": "skipped"
+        },
+        {
+          "key": "value_normalized",
+          "question": null,
+          "evidence": "5566500000000",
+          "result": "skipped"
+        }
+      ],
+      "structured": {
+        "entity": "Samsung Electronics",
+        "metric": "operating_profit",
+        "period_start": "2025",
+        "period_end": "2025",
+        "period_type": "DURATION",
+        "scope": "CFS",
+        "unit_normalized": "KRW",
+        "value_normalized": "5566500000000"
+      },
+      "raw_text": "SDC > 영업이익 | 제55기 / 금액: 55,665",
+      "rag": {
+        "evidence_id": "ev_fd7851ca79a35284",
+        "record_id": "ev_fd7851ca79a35284",
+        "raw_content": "SDC > 영업이익 | 제55기 / 금액: 55,665",
+        "document_id": "doc_e73a0d051a397bdc",
+        "source_file": "[삼성전자]사업보고서(2026.03.10).pdf",
+        "evidence_crop_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\dataset\\05_retrieval\\page_images\\pdf_2a23f2304139e64e3f15c4ab\\crop_0080_f92ce7ca33.jpg",
+        "page_image_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\dataset\\05_retrieval\\page_images\\pdf_2a23f2304139e64e3f15c4ab\\page_0080_c60c702054.jpg",
+        "pdf_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\pdf_data\\[삼성전자]사업보고서(2026.03.10).pdf",
+        "page": 80
+      },
+      "extra": {
+        "statement_type": "BUSINESS",
+        "filing_date": "2026-03-10",
+        "source_report_year": 2025,
+        "version": "original",
+        "version_id": "삼성전자_2025_2026-03-10_original",
+        "major_section": "II. 사업의 내용",
+        "section_path": [
+          "(2) 매출유형별 매출실적",
+          "(3) 주요 지역별 매출 현황",
+          "(2) 해외",
+          "(3) 판매경로별 매출액 비중",
+          "(2) 해외",
+          "5. 위험관리 및 파생거래",
+          "[△는 부(-)의 값임]",
+          "가. 경영상의 주요 계약 등",
+          "[△는 부(-)의 값임]",
+          "7. 기타 참고사항"
+        ],
+        "page": 80
+      }
+    },
+    {
+      "evidence_id": "ev_200753b9d9f05421",
+      "conflict_label": "apparent_conflict",
+      "checked_keys": [
+        "entity",
+        "metric",
+        "period_start",
+        "period_end",
+        "period_type",
+        "scope"
+      ],
+      "skipped_keys": [
+        "unit_normalized",
+        "value_normalized"
+      ],
+      "mismatched_keys": [],
+      "exclusion_reasons": [],
+      "revivable_if_scope_resolved": false,
+      "comparison": [
+        {
+          "key": "entity",
+          "question": "Samsung Electronics",
+          "evidence": "Samsung Electronics",
+          "result": "match"
+        },
+        {
+          "key": "metric",
+          "question": "operating_profit",
+          "evidence": "operating_profit",
+          "result": "match"
+        },
+        {
+          "key": "period_start",
+          "question": "2025",
+          "evidence": "2025",
+          "result": "match",
+          "rule": "containment"
+        },
+        {
+          "key": "period_end",
+          "question": "2025",
+          "evidence": "2025",
+          "result": "match",
+          "rule": "containment"
+        },
+        {
+          "key": "period_type",
+          "question": "DURATION",
+          "evidence": "DURATION",
+          "result": "match"
+        },
+        {
+          "key": "scope",
+          "question": "CFS",
+          "evidence": "CFS",
+          "result": "match"
+        },
+        {
+          "key": "unit_normalized",
+          "question": null,
+          "evidence": "KRW",
+          "result": "skipped"
+        },
+        {
+          "key": "value_normalized",
+          "question": null,
+          "evidence": "3733400000000",
+          "result": "skipped"
+        }
+      ],
+      "structured": {
+        "entity": "Samsung Electronics",
+        "metric": "operating_profit",
+        "period_start": "2025",
+        "period_end": "2025",
+        "period_type": "DURATION",
+        "scope": "CFS",
+        "unit_normalized": "KRW",
+        "value_normalized": "3733400000000"
+      },
+      "raw_text": "영업이익은 전년 | col_3: 3조 7,334억",
+      "rag": {
+        "evidence_id": "ev_200753b9d9f05421",
+        "record_id": "ev_200753b9d9f05421",
+        "raw_content": "영업이익은 전년 | col_3: 3조 7,334억",
+        "document_id": "doc_41d5fe37ae6ffa25",
+        "source_file": "[삼성전자]사업보고서(2025.03.11).pdf",
+        "evidence_crop_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\dataset\\05_retrieval\\page_images\\pdf_23ddb9d755a2427435546aca\\crop_0300_73db46aa3d.jpg",
+        "page_image_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\dataset\\05_retrieval\\page_images\\pdf_23ddb9d755a2427435546aca\\page_0300_f65121e66d.jpg",
+        "pdf_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\pdf_data\\[삼성전자]사업보고서(2025.03.11).pdf",
+        "page": 300
+      },
+      "extra": {
+        "statement_type": "MD&A",
+        "filing_date": "2025-03-11",
+        "source_report_year": 2024,
+        "version": "original",
+        "version_id": "삼성전자_2024_2025-03-11_original",
+        "major_section": "IV. 이사의 경영진단 및 분석의견",
+        "section_path": [
+          "IV. 이사의 경영진단 및 분석의견",
+          "나. 영업실적",
+          "[부문별 영업실적 분석]",
+          "[단위 : 백만원]"
+        ],
+        "page": 300
+      }
+    },
+    {
+      "evidence_id": "ev_8a010dfb4d8d0bff",
+      "conflict_label": "apparent_conflict",
+      "checked_keys": [
+        "entity",
+        "metric",
+        "period_start",
+        "period_end",
+        "period_type",
+        "scope"
+      ],
+      "skipped_keys": [
+        "unit_normalized",
+        "value_normalized"
+      ],
+      "mismatched_keys": [],
+      "exclusion_reasons": [],
+      "revivable_if_scope_resolved": false,
+      "comparison": [
+        {
+          "key": "entity",
+          "question": "Samsung Electronics",
+          "evidence": "Samsung Electronics",
+          "result": "match"
+        },
+        {
+          "key": "metric",
+          "question": "operating_profit",
+          "evidence": "operating_profit",
+          "result": "match"
+        },
+        {
+          "key": "period_start",
+          "question": "2025",
+          "evidence": "2025",
+          "result": "match",
+          "rule": "containment"
+        },
+        {
+          "key": "period_end",
+          "question": "2025",
+          "evidence": "2025",
+          "result": "match",
+          "rule": "containment"
+        },
+        {
+          "key": "period_type",
+          "question": "DURATION",
+          "evidence": "DURATION",
+          "result": "match"
+        },
+        {
+          "key": "scope",
+          "question": "CFS",
+          "evidence": "CFS",
+          "result": "match"
+        },
+        {
+          "key": "unit_normalized",
+          "question": null,
+          "evidence": "KRW",
+          "result": "skipped"
+        },
+        {
+          "key": "value_normalized",
+          "question": null,
+          "evidence": "1000000000000",
+          "result": "skipped"
+        }
+      ],
+      "structured": {
+        "entity": "Samsung Electronics",
+        "metric": "operating_profit",
+        "period_start": "2025",
+        "period_end": "2025",
+        "period_type": "DURATION",
+        "scope": "CFS",
+        "unit_normalized": "KRW",
+        "value_normalized": "1000000000000"
+      },
+      "raw_text": "영업이익은 전년 | col_1: 대비 1조",
+      "rag": {
+        "evidence_id": "ev_8a010dfb4d8d0bff",
+        "record_id": "ev_8a010dfb4d8d0bff",
+        "raw_content": "영업이익은 전년 | col_1: 대비 1조",
+        "document_id": "doc_41d5fe37ae6ffa25",
+        "source_file": "[삼성전자]사업보고서(2025.03.11).pdf",
+        "evidence_crop_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\dataset\\05_retrieval\\page_images\\pdf_23ddb9d755a2427435546aca\\crop_0300_1f5f23044a.jpg",
+        "page_image_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\dataset\\05_retrieval\\page_images\\pdf_23ddb9d755a2427435546aca\\page_0300_f65121e66d.jpg",
+        "pdf_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\pdf_data\\[삼성전자]사업보고서(2025.03.11).pdf",
+        "page": 300
+      },
+      "extra": {
+        "statement_type": "MD&A",
+        "filing_date": "2025-03-11",
+        "source_report_year": 2024,
+        "version": "original",
+        "version_id": "삼성전자_2024_2025-03-11_original",
+        "major_section": "IV. 이사의 경영진단 및 분석의견",
+        "section_path": [
+          "IV. 이사의 경영진단 및 분석의견",
+          "나. 영업실적",
+          "[부문별 영업실적 분석]",
+          "[단위 : 백만원]"
+        ],
+        "page": 300
+      }
+    }
+  ],
+  "genuine_conflict": [
+    {
+      "evidence_id": "ev_dc3b40e12b9cda3a",
+      "conflict_label": "genuine_conflict",
+      "checked_keys": [
+        "entity",
+        "metric",
+        "period_start",
+        "period_end",
+        "period_type",
+        "scope"
+      ],
+      "skipped_keys": [
+        "unit_normalized",
+        "value_normalized"
+      ],
+      "mismatched_keys": [
+        "scope"
+      ],
+      "exclusion_reasons": [
+        "scope_unresolved"
+      ],
+      "revivable_if_scope_resolved": true,
+      "comparison": [
+        {
+          "key": "entity",
+          "question": "Samsung Electronics",
+          "evidence": "Samsung Electronics",
+          "result": "match"
+        },
+        {
+          "key": "metric",
+          "question": "operating_profit",
+          "evidence": "operating_profit",
+          "result": "match"
+        },
+        {
+          "key": "period_start",
+          "question": "2025",
+          "evidence": "2025_12",
+          "result": "match",
+          "rule": "containment"
+        },
+        {
+          "key": "period_end",
+          "question": "2025",
+          "evidence": "2025_12",
+          "result": "match",
+          "rule": "containment"
+        },
+        {
+          "key": "period_type",
+          "question": "DURATION",
+          "evidence": "DURATION",
+          "result": "match"
+        },
+        {
+          "key": "scope",
+          "question": "CFS",
+          "evidence": "UNKNOWN",
+          "result": "mismatch",
+          "reason": "scope_unresolved"
+        },
+        {
+          "key": "unit_normalized",
+          "question": null,
+          "evidence": "KRW",
+          "result": "skipped"
+        },
+        {
+          "key": "value_normalized",
+          "question": null,
+          "evidence": "23603619000000",
+          "result": "skipped"
+        }
+      ],
+      "structured": {
+        "entity": "Samsung Electronics",
+        "metric": "operating_profit",
+        "period_start": "2025_12",
+        "period_end": "2025_12",
+        "period_type": "DURATION",
+        "scope": "UNKNOWN",
+        "unit_normalized": "KRW",
+        "value_normalized": "23603619000000"
+      },
+      "raw_text": "영업이익(손실) | 제57기 / 2025년 12월말: 23,603,619",
+      "rag": {
+        "evidence_id": "ev_dc3b40e12b9cda3a",
+        "record_id": "ev_dc3b40e12b9cda3a",
+        "raw_content": "영업이익(손실) | 제57기 / 2025년 12월말: 23,603,619",
+        "document_id": "doc_e73a0d051a397bdc",
+        "source_file": "[삼성전자]사업보고서(2026.03.10).pdf",
+        "evidence_crop_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\dataset\\05_retrieval\\page_images\\pdf_2a23f2304139e64e3f15c4ab\\crop_0082_742d52bcc6.jpg",
+        "page_image_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\dataset\\05_retrieval\\page_images\\pdf_2a23f2304139e64e3f15c4ab\\page_0082_c60c702054.jpg",
+        "pdf_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\pdf_data\\[삼성전자]사업보고서(2026.03.10).pdf",
+        "page": 82
+      },
+      "extra": {
+        "statement_type": "NOTE",
+        "filing_date": "2026-03-10",
+        "source_report_year": 2025,
+        "version": "original",
+        "version_id": "삼성전자_2025_2026-03-10_original",
+        "major_section": "III. 재무에 관한 사항",
+        "section_path": [
+          "III. 재무에 관한 사항",
+          "1. 요약재무정보",
+          "가. 요약연결재무정보",
+          "나.요약별도재무정보"
+        ],
+        "page": 82
+      }
+    }
+  ],
+  "final_context_for_vlm": [
+    {
+      "evidence_id": "ev_e14c1da11d44bb2a",
+      "conflict_label": "apparent_conflict",
+      "checked_keys": [
+        "entity",
+        "metric",
+        "period_start",
+        "period_end",
+        "period_type",
+        "scope"
+      ],
+      "skipped_keys": [
+        "unit_normalized",
+        "value_normalized"
+      ],
+      "mismatched_keys": [],
+      "exclusion_reasons": [],
+      "revivable_if_scope_resolved": false,
+      "comparison": [
+        {
+          "key": "entity",
+          "question": "Samsung Electronics",
+          "evidence": "Samsung Electronics",
+          "result": "match"
+        },
+        {
+          "key": "metric",
+          "question": "operating_profit",
+          "evidence": "operating_profit",
+          "result": "match"
+        },
+        {
+          "key": "period_start",
+          "question": "2025",
+          "evidence": "2025",
+          "result": "match",
+          "rule": "containment"
+        },
+        {
+          "key": "period_end",
+          "question": "2025",
+          "evidence": "2025",
+          "result": "match",
+          "rule": "containment"
+        },
+        {
+          "key": "period_type",
+          "question": "DURATION",
+          "evidence": "DURATION",
+          "result": "match"
+        },
+        {
+          "key": "scope",
+          "question": "CFS",
+          "evidence": "CFS",
+          "result": "match"
+        },
+        {
+          "key": "unit_normalized",
+          "question": null,
+          "evidence": "KRW",
+          "result": "skipped"
+        },
+        {
+          "key": "value_normalized",
+          "question": null,
+          "evidence": "12852700000000",
+          "result": "skipped"
+        }
+      ],
+      "structured": {
+        "entity": "Samsung Electronics",
+        "metric": "operating_profit",
+        "period_start": "2025",
+        "period_end": "2025",
+        "period_type": "DURATION",
+        "scope": "CFS",
+        "unit_normalized": "KRW",
+        "value_normalized": "12852700000000"
+      },
+      "raw_text": "라. 사업부문별 요약 재무 현황 2025년(제57기) 매출은 DX 부문이 187조 9,673억원(56.3%), DS 부문이 130조 1,282억원 (39%)이며, SDC가 29조 8,417억원(8.9%), Harman은 15조 7,833억원(4.7%)입니다. 2025년(제57기) 영업이익은 DX 부문이 12조 8,527억원, DS 부문이 24조 8,581억원, SDC가 4조 1,163억원, 그리고 Harman은 1조 5,311억원입니다.",
+      "rag": {
+        "evidence_id": "ev_e14c1da11d44bb2a",
+        "record_id": "ev_e14c1da11d44bb2a",
+        "raw_content": "라. 사업부문별 요약 재무 현황 2025년(제57기) 매출은 DX 부문이 187조 9,673억원(56.3%), DS 부문이 130조 1,282억원 (39%)이며, SDC가 29조 8,417억원(8.9%), Harman은 15조 7,833억원(4.7%)입니다. 2025년(제57기) 영업이익은 DX 부문이 12조 8,527억원, DS 부문이 24조 8,581억원, SDC가 4조 1,163억원, 그리고 Harman은 1조 5,311억원입니다.",
+        "document_id": "doc_e73a0d051a397bdc",
+        "source_file": "[삼성전자]사업보고서(2026.03.10).pdf",
+        "evidence_crop_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\dataset\\05_retrieval\\page_images\\pdf_2a23f2304139e64e3f15c4ab\\crop_0080_54dce18396.jpg",
+        "page_image_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\dataset\\05_retrieval\\page_images\\pdf_2a23f2304139e64e3f15c4ab\\page_0080_c60c702054.jpg",
+        "pdf_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\pdf_data\\[삼성전자]사업보고서(2026.03.10).pdf",
+        "page": 80
+      },
+      "extra": {
+        "statement_type": "BUSINESS",
+        "filing_date": "2026-03-10",
+        "source_report_year": 2025,
+        "version": "original",
+        "version_id": "삼성전자_2025_2026-03-10_original",
+        "major_section": "II. 사업의 내용",
+        "section_path": [
+          "(2) 매출유형별 매출실적",
+          "(3) 주요 지역별 매출 현황",
+          "(2) 해외",
+          "(3) 판매경로별 매출액 비중",
+          "(2) 해외",
+          "5. 위험관리 및 파생거래",
+          "[△는 부(-)의 값임]",
+          "가. 경영상의 주요 계약 등",
+          "[△는 부(-)의 값임]",
+          "7. 기타 참고사항"
+        ],
+        "page": 80
+      }
+    },
+    {
+      "evidence_id": "ev_fd7851ca79a35284",
+      "conflict_label": "apparent_conflict",
+      "checked_keys": [
+        "entity",
+        "metric",
+        "period_start",
+        "period_end",
+        "period_type",
+        "scope"
+      ],
+      "skipped_keys": [
+        "unit_normalized",
+        "value_normalized"
+      ],
+      "mismatched_keys": [],
+      "exclusion_reasons": [],
+      "revivable_if_scope_resolved": false,
+      "comparison": [
+        {
+          "key": "entity",
+          "question": "Samsung Electronics",
+          "evidence": "Samsung Electronics",
+          "result": "match"
+        },
+        {
+          "key": "metric",
+          "question": "operating_profit",
+          "evidence": "operating_profit",
+          "result": "match"
+        },
+        {
+          "key": "period_start",
+          "question": "2025",
+          "evidence": "2025",
+          "result": "match",
+          "rule": "containment"
+        },
+        {
+          "key": "period_end",
+          "question": "2025",
+          "evidence": "2025",
+          "result": "match",
+          "rule": "containment"
+        },
+        {
+          "key": "period_type",
+          "question": "DURATION",
+          "evidence": "DURATION",
+          "result": "match"
+        },
+        {
+          "key": "scope",
+          "question": "CFS",
+          "evidence": "CFS",
+          "result": "match"
+        },
+        {
+          "key": "unit_normalized",
+          "question": null,
+          "evidence": "KRW",
+          "result": "skipped"
+        },
+        {
+          "key": "value_normalized",
+          "question": null,
+          "evidence": "5566500000000",
+          "result": "skipped"
+        }
+      ],
+      "structured": {
+        "entity": "Samsung Electronics",
+        "metric": "operating_profit",
+        "period_start": "2025",
+        "period_end": "2025",
+        "period_type": "DURATION",
+        "scope": "CFS",
+        "unit_normalized": "KRW",
+        "value_normalized": "5566500000000"
+      },
+      "raw_text": "SDC > 영업이익 | 제55기 / 금액: 55,665",
+      "rag": {
+        "evidence_id": "ev_fd7851ca79a35284",
+        "record_id": "ev_fd7851ca79a35284",
+        "raw_content": "SDC > 영업이익 | 제55기 / 금액: 55,665",
+        "document_id": "doc_e73a0d051a397bdc",
+        "source_file": "[삼성전자]사업보고서(2026.03.10).pdf",
+        "evidence_crop_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\dataset\\05_retrieval\\page_images\\pdf_2a23f2304139e64e3f15c4ab\\crop_0080_f92ce7ca33.jpg",
+        "page_image_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\dataset\\05_retrieval\\page_images\\pdf_2a23f2304139e64e3f15c4ab\\page_0080_c60c702054.jpg",
+        "pdf_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\pdf_data\\[삼성전자]사업보고서(2026.03.10).pdf",
+        "page": 80
+      },
+      "extra": {
+        "statement_type": "BUSINESS",
+        "filing_date": "2026-03-10",
+        "source_report_year": 2025,
+        "version": "original",
+        "version_id": "삼성전자_2025_2026-03-10_original",
+        "major_section": "II. 사업의 내용",
+        "section_path": [
+          "(2) 매출유형별 매출실적",
+          "(3) 주요 지역별 매출 현황",
+          "(2) 해외",
+          "(3) 판매경로별 매출액 비중",
+          "(2) 해외",
+          "5. 위험관리 및 파생거래",
+          "[△는 부(-)의 값임]",
+          "가. 경영상의 주요 계약 등",
+          "[△는 부(-)의 값임]",
+          "7. 기타 참고사항"
+        ],
+        "page": 80
+      }
+    },
+    {
+      "evidence_id": "ev_200753b9d9f05421",
+      "conflict_label": "apparent_conflict",
+      "checked_keys": [
+        "entity",
+        "metric",
+        "period_start",
+        "period_end",
+        "period_type",
+        "scope"
+      ],
+      "skipped_keys": [
+        "unit_normalized",
+        "value_normalized"
+      ],
+      "mismatched_keys": [],
+      "exclusion_reasons": [],
+      "revivable_if_scope_resolved": false,
+      "comparison": [
+        {
+          "key": "entity",
+          "question": "Samsung Electronics",
+          "evidence": "Samsung Electronics",
+          "result": "match"
+        },
+        {
+          "key": "metric",
+          "question": "operating_profit",
+          "evidence": "operating_profit",
+          "result": "match"
+        },
+        {
+          "key": "period_start",
+          "question": "2025",
+          "evidence": "2025",
+          "result": "match",
+          "rule": "containment"
+        },
+        {
+          "key": "period_end",
+          "question": "2025",
+          "evidence": "2025",
+          "result": "match",
+          "rule": "containment"
+        },
+        {
+          "key": "period_type",
+          "question": "DURATION",
+          "evidence": "DURATION",
+          "result": "match"
+        },
+        {
+          "key": "scope",
+          "question": "CFS",
+          "evidence": "CFS",
+          "result": "match"
+        },
+        {
+          "key": "unit_normalized",
+          "question": null,
+          "evidence": "KRW",
+          "result": "skipped"
+        },
+        {
+          "key": "value_normalized",
+          "question": null,
+          "evidence": "3733400000000",
+          "result": "skipped"
+        }
+      ],
+      "structured": {
+        "entity": "Samsung Electronics",
+        "metric": "operating_profit",
+        "period_start": "2025",
+        "period_end": "2025",
+        "period_type": "DURATION",
+        "scope": "CFS",
+        "unit_normalized": "KRW",
+        "value_normalized": "3733400000000"
+      },
+      "raw_text": "영업이익은 전년 | col_3: 3조 7,334억",
+      "rag": {
+        "evidence_id": "ev_200753b9d9f05421",
+        "record_id": "ev_200753b9d9f05421",
+        "raw_content": "영업이익은 전년 | col_3: 3조 7,334억",
+        "document_id": "doc_41d5fe37ae6ffa25",
+        "source_file": "[삼성전자]사업보고서(2025.03.11).pdf",
+        "evidence_crop_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\dataset\\05_retrieval\\page_images\\pdf_23ddb9d755a2427435546aca\\crop_0300_73db46aa3d.jpg",
+        "page_image_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\dataset\\05_retrieval\\page_images\\pdf_23ddb9d755a2427435546aca\\page_0300_f65121e66d.jpg",
+        "pdf_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\pdf_data\\[삼성전자]사업보고서(2025.03.11).pdf",
+        "page": 300
+      },
+      "extra": {
+        "statement_type": "MD&A",
+        "filing_date": "2025-03-11",
+        "source_report_year": 2024,
+        "version": "original",
+        "version_id": "삼성전자_2024_2025-03-11_original",
+        "major_section": "IV. 이사의 경영진단 및 분석의견",
+        "section_path": [
+          "IV. 이사의 경영진단 및 분석의견",
+          "나. 영업실적",
+          "[부문별 영업실적 분석]",
+          "[단위 : 백만원]"
+        ],
+        "page": 300
+      }
+    },
+    {
+      "evidence_id": "ev_8a010dfb4d8d0bff",
+      "conflict_label": "apparent_conflict",
+      "checked_keys": [
+        "entity",
+        "metric",
+        "period_start",
+        "period_end",
+        "period_type",
+        "scope"
+      ],
+      "skipped_keys": [
+        "unit_normalized",
+        "value_normalized"
+      ],
+      "mismatched_keys": [],
+      "exclusion_reasons": [],
+      "revivable_if_scope_resolved": false,
+      "comparison": [
+        {
+          "key": "entity",
+          "question": "Samsung Electronics",
+          "evidence": "Samsung Electronics",
+          "result": "match"
+        },
+        {
+          "key": "metric",
+          "question": "operating_profit",
+          "evidence": "operating_profit",
+          "result": "match"
+        },
+        {
+          "key": "period_start",
+          "question": "2025",
+          "evidence": "2025",
+          "result": "match",
+          "rule": "containment"
+        },
+        {
+          "key": "period_end",
+          "question": "2025",
+          "evidence": "2025",
+          "result": "match",
+          "rule": "containment"
+        },
+        {
+          "key": "period_type",
+          "question": "DURATION",
+          "evidence": "DURATION",
+          "result": "match"
+        },
+        {
+          "key": "scope",
+          "question": "CFS",
+          "evidence": "CFS",
+          "result": "match"
+        },
+        {
+          "key": "unit_normalized",
+          "question": null,
+          "evidence": "KRW",
+          "result": "skipped"
+        },
+        {
+          "key": "value_normalized",
+          "question": null,
+          "evidence": "1000000000000",
+          "result": "skipped"
+        }
+      ],
+      "structured": {
+        "entity": "Samsung Electronics",
+        "metric": "operating_profit",
+        "period_start": "2025",
+        "period_end": "2025",
+        "period_type": "DURATION",
+        "scope": "CFS",
+        "unit_normalized": "KRW",
+        "value_normalized": "1000000000000"
+      },
+      "raw_text": "영업이익은 전년 | col_1: 대비 1조",
+      "rag": {
+        "evidence_id": "ev_8a010dfb4d8d0bff",
+        "record_id": "ev_8a010dfb4d8d0bff",
+        "raw_content": "영업이익은 전년 | col_1: 대비 1조",
+        "document_id": "doc_41d5fe37ae6ffa25",
+        "source_file": "[삼성전자]사업보고서(2025.03.11).pdf",
+        "evidence_crop_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\dataset\\05_retrieval\\page_images\\pdf_23ddb9d755a2427435546aca\\crop_0300_1f5f23044a.jpg",
+        "page_image_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\dataset\\05_retrieval\\page_images\\pdf_23ddb9d755a2427435546aca\\page_0300_f65121e66d.jpg",
+        "pdf_path": "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\pdf_data\\[삼성전자]사업보고서(2025.03.11).pdf",
+        "page": 300
+      },
+      "extra": {
+        "statement_type": "MD&A",
+        "filing_date": "2025-03-11",
+        "source_report_year": 2024,
+        "version": "original",
+        "version_id": "삼성전자_2024_2025-03-11_original",
+        "major_section": "IV. 이사의 경영진단 및 분석의견",
+        "section_path": [
+          "IV. 이사의 경영진단 및 분석의견",
+          "나. 영업실적",
+          "[부문별 영업실적 분석]",
+          "[단위 : 백만원]"
+        ],
+        "page": 300
+      }
+    }
+  ]
+}
