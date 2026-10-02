@@ -1,0 +1,66 @@
+{
+  "raw_question": "2025년 연결 기준 삼성전자의 영업이익은?",
+  "overall_status": "apparent_conflict",
+  "model": "gpt-4o-mini",
+  "evidence_ids_in_prompt": [
+    "ev_e14c1da11d44bb2a",
+    "ev_fd7851ca79a35284",
+    "ev_200753b9d9f05421",
+    "ev_8a010dfb4d8d0bff"
+  ],
+  "evidence_ids_excluded_genuine": [
+    "ev_dc3b40e12b9cda3a"
+  ],
+  "db_warning": null,
+  "system_prompt": "당신은 기업 공시 문서(사업보고서 등)를 근거로 질문에 답하는 재무 질의응답 어시스턴트입니다.\n\n[기본 원칙]\n1. 제공된 근거(구조화 정보, 원문 텍스트, 페이지 텍스트, 이미지)만 사용하세요. 근거에 없는 내용은 추측하지 말고 \"근거에서 확인되지 않습니다\"라고 답하세요.\n2. 근거의 값이 질문이 묻는 대상 전체의 값인지, 일부(사업부문·세그먼트·자회사·증감액·비율 등)의 값인지 구분하세요. 질문이 묻는 대상과 다른 값은 답으로 사용하지 마세요.\n3. 텍스트와 이미지의 숫자가 서로 다르면 어느 쪽이 맞는지 이미지로 확인하고, 불일치가 있었다는 사실을 짧게 언급하세요.\n4. 단위를 반드시 명시하세요(조원, 억원, 백만원 등). 단순 단위 환산 외의 계산(합산, 평균 등)은 근거가 직접 제시하지 않는 한 하지 마세요.\n5. 연결/별도 기준, 기간(회계연도)이 질문과 일치하는지 근거에서 확인하고, 확인되지 않으면 그 점을 명시하세요.\n6. 답변에는 사용한 근거의 출처(파일명, 페이지)를 함께 적으세요.\n\n[출력 형식]\n- 답변: 질문에 대한 직접적인 답 (1~3문장)\n- 근거: 사용한 근거 번호, 출처(파일명/페이지), 해당 값\n- 유의사항: 값 차이·불확실성·확인되지 않은 조건이 있을 때만 작성 (없으면 생략)",
+  "prompt_text": "아래 근거들은 질문 조건은 모두 일치하지만 값이 서로 다릅니다. raw_text를 비교해 차이의 원인(표기, 반올림, 정정, 잠정/확정 등)을 판단하고, 근거에 따라 하나를 선택하거나 차이를 명시하여 답변하세요. 근거 없이 임의로 값을 선택하거나 평균 내지 마세요.\n\n[질문]\n2025년 연결 기준 삼성전자의 영업이익은?\n\n[근거 4건]\n\n[근거 1] evidence_id: ev_e14c1da11d44bb2a\n■ 구조화 정보 (질문과 비교한 항목)\n- 기업(entity): Samsung Electronics  (질문 조건과 일치)\n- 지표(metric): operating_profit  (질문 조건과 일치)\n- 기간 시작(period_start): 2025  (질문 조건과 일치)\n- 기간 종료(period_end): 2025  (질문 조건과 일치)\n- 기간 유형(period_type): DURATION  (질문 조건과 일치)\n- 범위(scope, 연결/별도): CFS  (질문 조건과 일치)\n- 정규화 값(value_normalized): 12,852,700,000,000 KRW (= 12조 8,527억 원)\n■ 출처\n- 파일: [삼성전자]사업보고서(2026.03.10).pdf / 페이지: 80 / 제출일: 2026-03-10 / 보고서 연도: 2025 / 버전: original / 공시 구분: BUSINESS / 섹션: II. 사업의 내용\n■ 근거 원문(raw_text)\n라. 사업부문별 요약 재무 현황 2025년(제57기) 매출은 DX 부문이 187조 9,673억원(56.3%), DS 부문이 130조 1,282억원 (39%)이며, SDC가 29조 8,417억원(8.9%), Harman은 15조 7,833억원(4.7%)입니다. 2025년(제57기) 영업이익은 DX 부문이 12조 8,527억원, DS 부문이 24조 8,581억원, SDC가 4조 1,163억원, 그리고 Harman은 1조 5,311억원입니다.\n\n[근거 1 이미지: crop_0080_54dce18396.jpg]\n\n[근거 2] evidence_id: ev_fd7851ca79a35284\n■ 구조화 정보 (질문과 비교한 항목)\n- 기업(entity): Samsung Electronics  (질문 조건과 일치)\n- 지표(metric): operating_profit  (질문 조건과 일치)\n- 기간 시작(period_start): 2025  (질문 조건과 일치)\n- 기간 종료(period_end): 2025  (질문 조건과 일치)\n- 기간 유형(period_type): DURATION  (질문 조건과 일치)\n- 범위(scope, 연결/별도): CFS  (질문 조건과 일치)\n- 정규화 값(value_normalized): 5,566,500,000,000 KRW (= 5조 5,665억 원)\n■ 출처\n- 파일: [삼성전자]사업보고서(2026.03.10).pdf / 페이지: 80 / 제출일: 2026-03-10 / 보고서 연도: 2025 / 버전: original / 공시 구분: BUSINESS / 섹션: II. 사업의 내용\n■ 근거 원문(raw_text)\nSDC > 영업이익 | 제55기 / 금액: 55,665\n\n[근거 2 이미지: crop_0080_f92ce7ca33.jpg]\n\n[근거 3] evidence_id: ev_200753b9d9f05421\n■ 구조화 정보 (질문과 비교한 항목)\n- 기업(entity): Samsung Electronics  (질문 조건과 일치)\n- 지표(metric): operating_profit  (질문 조건과 일치)\n- 기간 시작(period_start): 2025  (질문 조건과 일치)\n- 기간 종료(period_end): 2025  (질문 조건과 일치)\n- 기간 유형(period_type): DURATION  (질문 조건과 일치)\n- 범위(scope, 연결/별도): CFS  (질문 조건과 일치)\n- 정규화 값(value_normalized): 3,733,400,000,000 KRW (= 3조 7,334억 원)\n■ 출처\n- 파일: [삼성전자]사업보고서(2025.03.11).pdf / 페이지: 300 / 제출일: 2025-03-11 / 보고서 연도: 2024 / 버전: original / 공시 구분: MD&A / 섹션: IV. 이사의 경영진단 및 분석의견\n■ 근거 원문(raw_text)\n영업이익은 전년 | col_3: 3조 7,334억\n\n[근거 3 이미지: crop_0300_73db46aa3d.jpg]\n\n[근거 4] evidence_id: ev_8a010dfb4d8d0bff\n■ 구조화 정보 (질문과 비교한 항목)\n- 기업(entity): Samsung Electronics  (질문 조건과 일치)\n- 지표(metric): operating_profit  (질문 조건과 일치)\n- 기간 시작(period_start): 2025  (질문 조건과 일치)\n- 기간 종료(period_end): 2025  (질문 조건과 일치)\n- 기간 유형(period_type): DURATION  (질문 조건과 일치)\n- 범위(scope, 연결/별도): CFS  (질문 조건과 일치)\n- 정규화 값(value_normalized): 1,000,000,000,000 KRW (= 1조 원)\n■ 출처\n- 파일: [삼성전자]사업보고서(2025.03.11).pdf / 페이지: 300 / 제출일: 2025-03-11 / 보고서 연도: 2024 / 버전: original / 공시 구분: MD&A / 섹션: IV. 이사의 경영진단 및 분석의견\n■ 근거 원문(raw_text)\n영업이익은 전년 | col_1: 대비 1조\n\n[근거 4 이미지: crop_0300_1f5f23044a.jpg]\n\n위 근거만을 사용하여 질문에 답하세요. 출력 형식은 시스템 지침을 따르세요.",
+  "evidence_debug": [
+    {
+      "evidence_id": "ev_e14c1da11d44bb2a",
+      "document_id": "doc_e73a0d051a397bdc",
+      "page": 80,
+      "db_evidence_found": true,
+      "page_text_used": false,
+      "images": [
+        "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\dataset\\05_retrieval\\page_images\\pdf_2a23f2304139e64e3f15c4ab\\crop_0080_54dce18396.jpg"
+      ]
+    },
+    {
+      "evidence_id": "ev_fd7851ca79a35284",
+      "document_id": "doc_e73a0d051a397bdc",
+      "page": 80,
+      "db_evidence_found": true,
+      "page_text_used": false,
+      "images": [
+        "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\dataset\\05_retrieval\\page_images\\pdf_2a23f2304139e64e3f15c4ab\\crop_0080_f92ce7ca33.jpg"
+      ]
+    },
+    {
+      "evidence_id": "ev_200753b9d9f05421",
+      "document_id": "doc_41d5fe37ae6ffa25",
+      "page": 300,
+      "db_evidence_found": true,
+      "page_text_used": false,
+      "images": [
+        "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\dataset\\05_retrieval\\page_images\\pdf_23ddb9d755a2427435546aca\\crop_0300_73db46aa3d.jpg"
+      ]
+    },
+    {
+      "evidence_id": "ev_8a010dfb4d8d0bff",
+      "document_id": "doc_41d5fe37ae6ffa25",
+      "page": 300,
+      "db_evidence_found": true,
+      "page_text_used": false,
+      "images": [
+        "C:\\Users\\user\\Desktop\\XAI\\CAUSE-RAG\\dataset\\05_retrieval\\page_images\\pdf_23ddb9d755a2427435546aca\\crop_0300_1f5f23044a.jpg"
+      ]
+    }
+  ],
+  "called_vlm": true,
+  "answer": "- 답변: 2025년 연결 기준 삼성전자의 영업이익은 12조 8,527억 원입니다.\n- 근거: [근거 1] evidence_id: ev_e14c1da11d44bb2a, 출처: [삼성전자]사업보고서(2026.03.10).pdf / 페이지: 80\n- 유의사항: 다른 근거에서는 영업이익이 5조 5,665억 원, 3조 7,334억 원, 1조 원로 제시되어 있으나, 이는 서로 다른 기준이나 섹션에서의 값으로 보입니다.",
+  "usage": {
+    "prompt_tokens": 103832,
+    "completion_tokens": 141,
+    "total_tokens": 103973
+  }
+}
