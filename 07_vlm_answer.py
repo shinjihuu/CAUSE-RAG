@@ -5,7 +5,7 @@ VLM 답변 생성기 (conflict_detector 결과 -> GPT-4o(mini) 답변)
 [DB]    CAUSE-RAG/dataset/05_retrieval/cause_rag_multimodal.db  (SQLite, 읽기 전용으로만 사용)
 [출력]  CAUSE-RAG/dataset/07_answer/answer_result.json
 
-동작
+[동작]
   1. conflict_result.json의 overall_status 에 따라 충돌 경우별 지시문을 프롬프트에 추가
        - no_conflict        : 값이 모두 일치
        - apparent_conflict  : 조건은 일치하나 값이 다름 -> raw_text 비교 후 선택/차이 명시
@@ -13,11 +13,11 @@ VLM 답변 생성기 (conflict_detector 결과 -> GPT-4o(mini) 답변)
   2. genuine_conflict 근거는 프롬프트에 절대 넣지 않는다 (final_context_for_vlm 만 사용).
   3. 근거마다 (a) 질문과 비교한 구조화 내용, (b) 출처, (c) raw_text,
      (d) DB의 페이지 원문(native_text), (e) crop 이미지를 함께 넣는다.
-  4. 질문은 raw 질문 문자열만 전달한다 (구조화된 질문은 VLM에 보내지 않음).
+  4. 질문은 raw 질문 문자열만 전달한다.
 
 실행
-  python vlm_answer.py              # 실제 호출 (환경변수 OPENAI_API_KEY 필요)
-  python vlm_answer.py --dry-run    # API 호출 없이 프롬프트만 생성/저장
+  python 07_vlm_answer.py              # 실제 호출 (환경변수 OPENAI_API_KEY 필요)
+  python 07_vlm_answer.py --dry-run    # API 호출 없이 프롬프트만 생성/저장
 """
 
 import argparse
@@ -417,8 +417,11 @@ def run(
     use_page_text: bool = True,
     use_images: bool = True,
     use_page_image: bool = False,
+    result: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    result = load_json(input_path)
+    # result가 주어지면(통합 파이프라인) 06 결과 파일을 다시 읽지 않는다.
+    if result is None:
+        result = load_json(input_path)
     status = result["overall_status"]
     records = result.get("final_context_for_vlm", [])
 

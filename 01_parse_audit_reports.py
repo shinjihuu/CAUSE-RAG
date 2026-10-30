@@ -109,7 +109,6 @@ FRONT_MATTER_RESCUE_PAGES = 40
 SAME_TABLE_IOU = 0.38
 SAME_TABLE_COVERAGE = 0.65
 MIN_ACCEPTED_SELECTION_SCORE = 0.38
-NATIVE_TEXT_MIN_CHARS = 50
 NATIVE_BAD_CHAR_RATIO_LIMIT = 0.03
 BOTTOM_REGION_RATIO = 0.77
 TOP_REGION_RATIO = 0.23
@@ -1400,10 +1399,10 @@ def extract_native_lines(page: fitz.Page) -> list[dict[str, Any]]:
     return out
 
 
-def validate_native_document(mu_doc: fitz.Document) -> dict[str, Any]:
+def validate_native_document(page_texts: list[str]) -> dict[str, Any]:
+    """page_texts: clean_text()가 적용된 페이지별 native 텍스트 (페이지당 1회만 추출)."""
     total = bad = empty_pages = 0
-    for page in mu_doc:
-        content = clean_text(page.get_text("text", sort=True))
+    for content in page_texts:
         compacted = re.sub(r"\s+", "", content)
         total += len(compacted)
         bad += sum(ch in {"�", "□", "\ufffd"} for ch in compacted)
@@ -1419,9 +1418,12 @@ def validate_native_document(mu_doc: fitz.Document) -> dict[str, Any]:
     }
 
 
-def extract_page_lines(page: fitz.Page, table_bboxes: list[tuple[float, float, float, float]]):
-    """Native PyMuPDF text only. No OCR fallback."""
-    native_text = clean_text(page.get_text("text", sort=True))
+def extract_page_lines(
+    page: fitz.Page,
+    table_bboxes: list[tuple[float, float, float, float]],
+    native_text: str,
+):
+    """Native PyMuPDF text only. No OCR fallback. native_text는 호출 측에서 1회 추출한 값."""
     quality = native_text_quality(native_text)
     lines = [
         line for line in extract_native_lines(page)
@@ -1571,7 +1573,12 @@ def parse_one_pdf(pdf_path: Path, save_debug: bool):
     pl_doc = pdfplumber.open(pdf_path)
 
     try:
-        native_validation = validate_native_document(mu_doc)
+        # 페이지 텍스트는 문서당 1회만 추출해 검증·미리보기·QC에서 공유한다.
+        page_texts = [
+            clean_text(mu_doc[i].get_text("text", sort=True))
+            for i in range(len(mu_doc))
+        ]
+        native_validation = validate_native_document(page_texts)
         print(
             f"native chars={native_validation['total_native_characters']}, "
             f"bad ratio={native_validation['bad_character_ratio']}"
@@ -1584,10 +1591,7 @@ def parse_one_pdf(pdf_path: Path, save_debug: bool):
                 f"validation={native_validation}"
             )
 
-        preview = "\n".join(
-            clean_text(mu_doc[i].get_text("text", sort=True))
-            for i in range(min(len(mu_doc), 12))
-        )
+        preview = "\n".join(page_texts[:12])
 
         entity = infer_entity(preview + "\n" + pdf_path.name)
         year = infer_fiscal_year(preview)
@@ -1641,8 +1645,10 @@ def parse_one_pdf(pdf_path: Path, save_debug: bool):
                 for t in selected_by_page.get(p, [])
             ]
 
+            native_page_text = page_texts[p - 1]
+
             lines, method, quality = extract_page_lines(
-                mu_doc[p - 1], bboxes
+                mu_doc[p - 1], bboxes, native_page_text
             )
 
             blocks = merge_lines_to_blocks(lines)
@@ -1652,10 +1658,6 @@ def parse_one_pdf(pdf_path: Path, save_debug: bool):
                 "method": method,
                 "quality": quality,
             }
-
-            native_page_text = clean_text(
-                mu_doc[p - 1].get_text("text", sort=True)
-            )
 
             page_text_qc.append({
                 "entity": entity,

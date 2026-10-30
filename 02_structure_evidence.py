@@ -85,7 +85,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import math
 import re
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
@@ -150,22 +149,6 @@ CURRENCY_SCALES = {
     "백만원": 1_000_000,
     "억원": 100_000_000,
     "조원": 1_000_000_000_000,
-}
-
-NON_CURRENCY_UNITS = {
-    "%",
-    "명",
-    "주",
-    "대",
-    "개",
-    "건",
-    "톤",
-    "천톤",
-    "백만톤",
-    "MW",
-    "GW",
-    "MWh",
-    "GWh",
 }
 
 UNIT_PATTERN = (

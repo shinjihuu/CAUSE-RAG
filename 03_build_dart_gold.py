@@ -202,7 +202,7 @@ import re
 import sys
 import time
 import zipfile
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -2784,72 +2784,6 @@ def structuring_quality(
         + 0.20
         * statement_component
     )
-
-
-def same_nonmetric_dimensions(
-    dart_row: pd.Series,
-    pdf_row: pd.Series,
-) -> bool:
-    try:
-        return (
-            clean_text(
-                dart_row[
-                    "entity"
-                ]
-            )
-            == clean_text(
-                pdf_row[
-                    "entity"
-                ]
-            )
-            and int(
-                dart_row[
-                    "source_report_year"
-                ]
-            )
-            == int(
-                float(
-                    pdf_row[
-                        "source_report_year"
-                    ]
-                )
-            )
-            and int(
-                dart_row[
-                    "period_year"
-                ]
-            )
-            == int(
-                float(
-                    pdf_row[
-                        "period_year"
-                    ]
-                )
-            )
-            and clean_text(
-                dart_row[
-                    "scope"
-                ]
-            )
-            == clean_text(
-                pdf_row[
-                    "scope"
-                ]
-            )
-            and clean_text(
-                dart_row[
-                    "statement_type"
-                ]
-            )
-            == clean_text(
-                pdf_row[
-                    "statement_type"
-                ]
-            )
-        )
-
-    except Exception:
-        return False
 
 
 def candidate_pool_for_dart_row(

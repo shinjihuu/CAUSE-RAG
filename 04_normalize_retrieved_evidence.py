@@ -1989,6 +1989,11 @@ def enforce_evidence_primary_consistency(
     return LLMExtraction.model_validate(data)
 
 
+def cache_dir_of(args: argparse.Namespace) -> Path:
+    explicit = getattr(args, "cache_dir", None)
+    return Path(explicit) if explicit else args.output_dir / "cache"
+
+
 def structure_question(
     client: Any,
     question: str,
@@ -2001,7 +2006,7 @@ def structure_question(
         model=args.model,
         record_type="question",
         payload={"raw_question": clipped},
-        cache_dir=args.output_dir / "cache",
+        cache_dir=cache_dir_of(args),
         use_cache=not args.no_cache,
         max_attempts=args.max_attempts,
         max_output_tokens=args.max_output_tokens,
@@ -2061,7 +2066,7 @@ def structure_one_evidence(
         model=args.model,
         record_type="evidence",
         payload=payload,
-        cache_dir=args.output_dir / "cache",
+        cache_dir=cache_dir_of(args),
         use_cache=not args.no_cache,
         max_attempts=args.max_attempts,
         max_output_tokens=args.max_output_tokens,
@@ -2364,37 +2369,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-evidence-chars", type=int, default=20000)
     parser.add_argument("--allow-variable-k", action="store_true")
     parser.add_argument("--no-cache", action="store_true")
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="LLM 추출 캐시 폴더(기본: <output-dir>/cache). 실행 간 캐시를 공유할 때 지정",
+    )
     parser.add_argument("--self-test", action="store_true")
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    args.output_dir = args.output_dir.resolve()
+def run_normalization(args: argparse.Namespace) -> dict[str, Any]:
+    """질문 + Top-K 근거를 구조화·정규화하고 bundle(dict)을 반환한다.
 
-    if args.self_test:
-        run_self_test()
-        return
-
-    if args.input is None:
-        raise SystemExit(
-            "[ERROR] --input retrieval_input.json 이 필요합니다.\n"
-            "먼저 API 없이 규칙을 점검하려면: python 04_normalize_retrieved_evidence.py --self-test"
-        )
-    input_path = args.input.resolve()
-    if not input_path.exists():
-        raise SystemExit(f"[ERROR] 입력 파일이 없습니다: {input_path}")
-    if not 1 <= args.workers <= 5:
-        raise SystemExit("[ERROR] --workers는 1~5 범위여야 합니다.")
-    if args.max_attempts < 1:
-        raise SystemExit("[ERROR] --max-attempts는 1 이상이어야 합니다.")
-    if args.max_output_tokens < 512:
-        raise SystemExit("[ERROR] --max-output-tokens는 512 이상이어야 합니다.")
-    if not os.environ.get("OPENAI_API_KEY"):
-        raise SystemExit(
-            "[ERROR] OPENAI_API_KEY 환경변수가 없습니다. 키를 코드/JSON 파일에 직접 넣지 마세요."
-        )
-
+    CLI(main)와 통합 파이프라인이 같은 함수를 호출한다(서브프로세스 불필요).
+    args 필수 속성: input, output_dir, model, workers, timeout, max_attempts,
+    max_output_tokens, max_question_chars, max_evidence_chars, allow_variable_k, no_cache
+    """
+    args.output_dir = Path(args.output_dir).resolve()
+    input_path = Path(args.input).resolve()
     try:
         from openai import OpenAI
     except ImportError as exc:
@@ -2488,6 +2481,38 @@ def main() -> None:
     print(f"Summary : {summary_path}")
     print("[INFO] Stage 04는 구조화·정규화 전용입니다.")
     print("[INFO] Conflict detection/filtering은 다음 단계에서 수행합니다.")
+
+    return bundle
+
+
+def main() -> None:
+    args = parse_args()
+    args.output_dir = args.output_dir.resolve()
+
+    if args.self_test:
+        run_self_test()
+        return
+
+    if args.input is None:
+        raise SystemExit(
+            "[ERROR] --input retrieval_input.json 이 필요합니다.\n"
+            "먼저 API 없이 규칙을 점검하려면: python 04_normalize_retrieved_evidence.py --self-test"
+        )
+    input_path = args.input.resolve()
+    if not input_path.exists():
+        raise SystemExit(f"[ERROR] 입력 파일이 없습니다: {input_path}")
+    if not 1 <= args.workers <= 5:
+        raise SystemExit("[ERROR] --workers는 1~5 범위여야 합니다.")
+    if args.max_attempts < 1:
+        raise SystemExit("[ERROR] --max-attempts는 1 이상이어야 합니다.")
+    if args.max_output_tokens < 512:
+        raise SystemExit("[ERROR] --max-output-tokens는 512 이상이어야 합니다.")
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise SystemExit(
+            "[ERROR] OPENAI_API_KEY 환경변수가 없습니다. 키를 코드/JSON 파일에 직접 넣지 마세요."
+        )
+
+    run_normalization(args)
 
 
 if __name__ == "__main__":

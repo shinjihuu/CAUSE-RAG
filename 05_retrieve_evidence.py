@@ -37,11 +37,12 @@ import os
 import random
 import re
 import sqlite3
-import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Literal, Protocol, Sequence
@@ -67,13 +68,7 @@ DEFAULT_NORMALIZED = BASE_DIR / "dataset" / "04_normalized"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_VISION_MAX_OUTPUT_TOKENS = 1800
 DEFAULT_NORMALIZATION_MAX_OUTPUT_TOKENS = 1600
-SCRIPT04_CANDIDATES = (
-    BASE_DIR / "04_normalize_retrieved_evidence.py",
-    BASE_DIR / "04_normalize_retrieved_evidence(1).py",
-)
-SCRIPT04 = next(
-    (path for path in SCRIPT04_CANDIDATES if path.exists()), SCRIPT04_CANDIDATES[0]
-)
+SCRIPT04 = BASE_DIR / "04_normalize_retrieved_evidence.py"
 SCHEMA_VERSION = "cause-rag-multimodal-retrieval-v2.0"
 DB_VERSION = "2"
 VISION_PROMPT_VERSION = "cause-rag-page-rerank-v1.0"
@@ -333,31 +328,41 @@ def tokenize(text: str) -> list[str]:
     return output
 
 
-def bm25(query: Sequence[str], documents: Sequence[Sequence[str]]) -> np.ndarray:
-    scores = np.zeros(len(documents), dtype=np.float64)
-    if not documents or not query:
-        return scores
-    lengths = np.array([len(doc) for doc in documents], dtype=np.float64)
-    average = max(float(lengths.mean()), 1.0)
-    frequencies = [Counter(doc) for doc in documents]
-    document_frequency = Counter()
-    for frequency in frequencies:
-        document_frequency.update(frequency.keys())
-    for token in set(query):
-        df = document_frequency.get(token, 0)
-        if not df:
-            continue
-        idf = math.log(1 + (len(documents) - df + 0.5) / (df + 0.5))
-        for index, frequency in enumerate(frequencies):
-            tf = frequency.get(token, 0)
-            if tf:
+class BM25Index:
+    """문서 집합에 대한 BM25 통계(문서 길이·역색인)를 1회 계산해 재사용한다.
+
+    기존 bm25()는 질문마다 모든 문서의 Counter를 다시 만들고 모든 문서를 순회했다.
+    여기서는 인덱스 로드 시 posting list를 만들고, 질문 토큰의 posting만 방문한다.
+    점수 공식은 기존과 동일하다.
+    """
+
+    def __init__(self, documents: Sequence[Sequence[str]]):
+        self.size = len(documents)
+        self.lengths = np.array([len(doc) for doc in documents], dtype=np.float64)
+        self.average = max(float(self.lengths.mean()), 1.0) if self.size else 1.0
+        self.postings: dict[str, list[tuple[int, int]]] = defaultdict(list)
+        for index, doc in enumerate(documents):
+            for token, tf in Counter(doc).items():
+                self.postings[token].append((index, tf))
+
+    def scores(self, query: Sequence[str]) -> np.ndarray:
+        scores = np.zeros(self.size, dtype=np.float64)
+        if not self.size or not query:
+            return scores
+        for token in set(query):
+            posting = self.postings.get(token)
+            if not posting:
+                continue
+            df = len(posting)
+            idf = math.log(1 + (self.size - df + 0.5) / (df + 0.5))
+            for index, tf in posting:
                 scores[index] += (
                     idf
                     * tf
                     * 2.5
-                    / (tf + 1.5 * (0.25 + 0.75 * lengths[index] / average))
+                    / (tf + 1.5 * (0.25 + 0.75 * self.lengths[index] / self.average))
                 )
-    return scores
+        return scores
 
 
 def normalized_filename(value: str) -> str:
@@ -407,12 +412,33 @@ def image_path(
     )
 
 
-def render_page(pdf_path: Path, page: int, output: Path, dpi: int) -> Path:
+class PdfCache:
+    """한 번의 검색 동안 PDF 핸들을 재사용한다(렌더링마다 대용량 PDF를 다시 열지 않기 위함)."""
+
+    def __init__(self) -> None:
+        self._documents: dict[str, Any] = {}
+
+    def get(self, path: Path) -> Any:
+        key = str(path)
+        if key not in self._documents:
+            self._documents[key] = require_fitz().open(path)
+        return self._documents[key]
+
+    def close(self) -> None:
+        for document in self._documents.values():
+            document.close()
+        self._documents.clear()
+
+
+def render_page(
+    pdf_path: Path, page: int, output: Path, dpi: int, pdfs: PdfCache | None = None
+) -> Path:
     if output.exists() and output.stat().st_size:
         return output
     fitz = require_fitz()
     output.parent.mkdir(parents=True, exist_ok=True)
-    with fitz.open(pdf_path) as document:
+    document = pdfs.get(pdf_path) if pdfs else fitz.open(pdf_path)
+    try:
         if not 1 <= page <= len(document):
             raise ValueError(
                 f"page out of range: {pdf_path.name} {page}/{len(document)}"
@@ -421,11 +447,19 @@ def render_page(pdf_path: Path, page: int, output: Path, dpi: int) -> Path:
             matrix=fitz.Matrix(dpi / 72, dpi / 72), alpha=False, colorspace=fitz.csRGB
         )
         pixmap.save(output)
+    finally:
+        if not pdfs:
+            document.close()
     return output
 
 
 def render_crop(
-    pdf_path: Path, page: int, bbox: dict[str, float] | None, output: Path, dpi: int
+    pdf_path: Path,
+    page: int,
+    bbox: dict[str, float] | None,
+    output: Path,
+    dpi: int,
+    pdfs: PdfCache | None = None,
 ) -> Path | None:
     if not bbox:
         return None
@@ -433,7 +467,8 @@ def render_crop(
         return output
     fitz = require_fitz()
     output.parent.mkdir(parents=True, exist_ok=True)
-    with fitz.open(pdf_path) as document:
+    document = pdfs.get(pdf_path) if pdfs else fitz.open(pdf_path)
+    try:
         pdf_page = document[page - 1]
         rect = (
             fitz.Rect(bbox["x0"] - 6, bbox["y0"] - 6, bbox["x1"] + 6, bbox["y1"] + 6)
@@ -448,6 +483,9 @@ def render_crop(
             colorspace=fitz.csRGB,
         )
         pixmap.save(output)
+    finally:
+        if not pdfs:
+            document.close()
     return output
 
 
@@ -700,6 +738,7 @@ class OpenAIVisionReranker:
         self.model, self.detail, self.batch_size = model, detail, batch_size
         self.attempts, self.fallback = attempts, fallback
         self.max_output_tokens = max_output_tokens
+        self.max_workers = 4
         self.client = OpenAI(timeout=timeout, max_retries=0)
 
     def _batch(
@@ -784,9 +823,73 @@ class OpenAIVisionReranker:
     def rerank(
         self, question: str, candidates: Sequence[PageCandidate]
     ) -> dict[str, dict[str, Any]]:
-        output = {}
-        for batch in batches(list(candidates), self.batch_size):
-            output.update(self._batch(question, batch))
+        chunks = list(batches(list(candidates), self.batch_size))
+        output: dict[str, dict[str, Any]] = {}
+        if len(chunks) <= 1:
+            for chunk in chunks:
+                output.update(self._batch(question, chunk))
+            return output
+        # 배치 간에는 의존성이 없으므로 병렬 호출한다(순차 호출 대비 지연 감소).
+        with ThreadPoolExecutor(max_workers=min(self.max_workers, len(chunks))) as pool:
+            for part in pool.map(lambda chunk: self._batch(question, chunk), chunks):
+                output.update(part)
+        return output
+
+
+class CachedVision:
+    """같은 (질문, 페이지 이미지, 모델) 조합의 비전 재순위화 결과를 디스크에 재사용한다.
+
+    가중치·top-k만 바꿔 다시 실행하거나 같은 질문을 반복할 때 API 호출을 생략한다.
+    VISION_FALLBACK 결과는 일시적 실패이므로 캐시하지 않는다.
+    """
+
+    def __init__(self, inner: Any, cache_path: Path | None):
+        self.inner = inner
+        self.model = inner.model
+        self.path = cache_path
+        self.hits = self.misses = 0
+        self.store: dict[str, dict[str, Any]] = {}
+        if cache_path and cache_path.exists():
+            try:
+                self.store = json.loads(cache_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                self.store = {}
+
+    def _key(self, question: str, candidate: PageCandidate) -> str:
+        return stable_hash(
+            VISION_PROMPT_VERSION,
+            self.model,
+            getattr(self.inner, "detail", ""),
+            question,
+            candidate.row["page_id"],
+            candidate.image_path.name,
+            length=32,
+        )
+
+    def rerank(
+        self, question: str, candidates: Sequence[PageCandidate]
+    ) -> dict[str, dict[str, Any]]:
+        output: dict[str, dict[str, Any]] = {}
+        missing: list[PageCandidate] = []
+        for candidate in candidates:
+            cached = self.store.get(self._key(question, candidate))
+            if cached is not None:
+                output[str(candidate.row["page_id"])] = cached
+                self.hits += 1
+            else:
+                missing.append(candidate)
+        if missing:
+            self.misses += len(missing)
+            fresh = self.inner.rerank(question, missing)
+            output.update(fresh)
+            changed = False
+            for candidate in missing:
+                result = fresh[str(candidate.row["page_id"])]
+                if not str(result.get("rationale", "")).startswith("VISION_FALLBACK"):
+                    self.store[self._key(question, candidate)] = result
+                    changed = True
+            if changed and self.path:
+                save_json(self.path, self.store)
         return output
 
 
@@ -865,7 +968,7 @@ def sync_evidence(
             "SELECT evidence_id,content_hash,embedding_model,embedding_dim FROM evidence_index"
         )
     }
-    pending, unchanged = [], 0
+    pending, unchanged, refresh = [], 0, []
     for document in documents:
         old = existing.get(document.evidence_id)
         current = (
@@ -877,8 +980,7 @@ def sync_evidence(
         if current and not force:
             unchanged += 1
             f = document.fields
-            connection.execute(
-                """UPDATE evidence_index SET modality=?,entity=?,metric_raw=?,metric_canonical=?,period_raw=?,period_year=?,scope=?,statement=?,version=?,document_id=?,source_file=?,page=?,bbox_json=?,pdf_path=?,metadata_json=?,source_path=?,updated_at=CURRENT_TIMESTAMP WHERE evidence_id=?""",
+            refresh.append(
                 (
                     f["modality"],
                     f["entity"],
@@ -903,6 +1005,12 @@ def sync_evidence(
             )
         else:
             pending.append(document)
+    # 미변경 행의 메타데이터 갱신은 한 번의 executemany로 처리한다(행마다 execute 호출 X).
+    if refresh:
+        connection.executemany(
+            """UPDATE evidence_index SET modality=?,entity=?,metric_raw=?,metric_canonical=?,period_raw=?,period_year=?,scope=?,statement=?,version=?,document_id=?,source_file=?,page=?,bbox_json=?,pdf_path=?,metadata_json=?,source_path=?,updated_at=CURRENT_TIMESTAMP WHERE evidence_id=?""",
+            refresh,
+        )
     updated = 0
     for batch in batches(pending, batch_size):
         vectors = embedder.embed_texts([item.retrieval_text for item in batch])
@@ -963,7 +1071,7 @@ def sync_pages(
             "SELECT page_id,content_hash,embedding_model,embedding_dim FROM page_index"
         )
     }
-    pending, unchanged = [], 0
+    pending, unchanged, refresh = [], 0, []
     for item in documents:
         old = existing.get(item.page_id)
         current = (
@@ -974,8 +1082,7 @@ def sync_pages(
         )
         if current and not force:
             unchanged += 1
-            connection.execute(
-                """UPDATE page_index SET document_id=?,entity=?,source_file=?,page=?,pdf_path=?,pdf_sha256=?,native_text=?,linked_ids_json=?,metadata_json=?,updated_at=CURRENT_TIMESTAMP WHERE page_id=?""",
+            refresh.append(
                 (
                     item.document_id,
                     item.entity,
@@ -991,6 +1098,11 @@ def sync_pages(
             )
         else:
             pending.append(item)
+    if refresh:
+        connection.executemany(
+            """UPDATE page_index SET document_id=?,entity=?,source_file=?,page=?,pdf_path=?,pdf_sha256=?,native_text=?,linked_ids_json=?,metadata_json=?,updated_at=CURRENT_TIMESTAMP WHERE page_id=?""",
+            refresh,
+        )
     updated = 0
     for batch in batches(pending, batch_size):
         vectors = embedder.embed_texts([item.retrieval_text for item in batch])
@@ -1027,6 +1139,50 @@ def sync_pages(
     return {"updated": updated, "unchanged": unchanged, "deleted": len(stale)}
 
 
+def source_fingerprint(
+    sources: Sequence[Path],
+    pdfs: Sequence[Path],
+    embedder: Embedder,
+    limit: int,
+    allow_missing: bool,
+) -> str:
+    """입력(02 결과·PDF)과 인덱스 설정이 같으면 같은 값. 파일 내용 대신 크기·mtime을 사용한다."""
+    parts = [
+        SCHEMA_VERSION,
+        DB_VERSION,
+        embedder.model,
+        str(embedder.dimensions),
+        str(limit),
+        str(allow_missing),
+    ]
+    for path in [*sources, *pdfs]:
+        resolved = Path(path).resolve()
+        stat = resolved.stat()
+        parts.append(f"{resolved}|{stat.st_size}|{stat.st_mtime_ns}")
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def stored_build_summary(db: Path, fingerprint: str) -> dict[str, Any] | None:
+    """DB가 ready 상태이고 fingerprint가 같으면 직전 빌드 요약을, 아니면 None을 반환."""
+    if not db.exists():
+        return None
+    connection = connect_db(db)
+    try:
+        try:
+            if (
+                get_meta(connection, "state") != "ready"
+                or get_meta(connection, "db_version") != DB_VERSION
+                or get_meta(connection, "source_fingerprint") != fingerprint
+            ):
+                return None
+            raw = get_meta(connection, "build_summary")
+        except sqlite3.Error:
+            return None
+        return json.loads(raw) if raw else None
+    finally:
+        connection.close()
+
+
 def build_index(
     sources: Sequence[Path],
     pdfs: Sequence[Path],
@@ -1037,6 +1193,12 @@ def build_index(
     force: bool,
     allow_missing: bool,
 ) -> dict[str, Any]:
+    # 입력이 그대로면 PDF 해시·전 페이지 텍스트 추출·토큰화·행별 UPDATE를 모두 건너뛴다.
+    fingerprint = source_fingerprint(sources, pdfs, embedder, limit, allow_missing)
+    if not force:
+        cached = stored_build_summary(db, fingerprint)
+        if cached is not None:
+            return {**cached, "rebuild_skipped": True}
     evidence, evidence_summary = load_evidence(
         sources, pdf_lookup(pdfs), limit, allow_missing
     )
@@ -1048,19 +1210,24 @@ def build_index(
         connection.commit()
         evidence_sync = sync_evidence(connection, evidence, embedder, batch_size, force)
         page_sync = sync_pages(connection, pages, embedder, batch_size, force)
-        set_meta(connection, "schema_version", SCHEMA_VERSION)
-        set_meta(connection, "embedding_model", embedder.model)
-        set_meta(connection, "embedding_dim", embedder.dimensions)
-        set_meta(connection, "state", "ready")
-        connection.commit()
-        return {
+        summary = {
             "schema_version": SCHEMA_VERSION,
             "embedding_model": embedder.model,
             "embedding_dimensions": embedder.dimensions,
             "evidence": {**evidence_summary, **evidence_sync},
             "pages": {**page_summary, **page_sync},
             "gold_data_indexed": False,
+            "rebuild_skipped": False,
         }
+        set_meta(connection, "schema_version", SCHEMA_VERSION)
+        set_meta(connection, "embedding_model", embedder.model)
+        set_meta(connection, "embedding_dim", embedder.dimensions)
+        set_meta(connection, "source_fingerprint", fingerprint)
+        set_meta(connection, "build_summary", summary)
+        set_meta(connection, "build_stamp", uuid.uuid4().hex)  # 메모리 인덱스 캐시 무효화용
+        set_meta(connection, "state", "ready")
+        connection.commit()
+        return summary
     except Exception:
         set_meta(connection, "state", "failed")
         connection.commit()
@@ -1078,14 +1245,21 @@ def validate_index(connection: sqlite3.Connection, embedder: Embedder) -> None:
         raise ValueError("DB/query embedding configuration mismatch; rebuild index")
 
 
+MODULE04_NAME = "cause_rag_script04_rules"
+
+
 def load_script04() -> Any | None:
+    """04 모듈을 프로세스당 1회만 로드한다(질문 힌트 규칙 + 인-프로세스 정규화 실행 공용)."""
+    module = sys.modules.get(MODULE04_NAME)
+    if module is not None:
+        return module
     if not SCRIPT04.exists():
         return None
-    spec = importlib.util.spec_from_file_location("cause_rag_script04_rules", SCRIPT04)
+    spec = importlib.util.spec_from_file_location(MODULE04_NAME, SCRIPT04)
     if not spec or not spec.loader:
         return None
     module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
+    sys.modules[MODULE04_NAME] = module
     spec.loader.exec_module(module)
     return module
 
@@ -1105,8 +1279,9 @@ def year_in(text: str) -> str | None:
 
 
 def question_hints(
-    question: str, rows: Sequence[sqlite3.Row], module: Any | None
+    question: str, entities: Sequence[str], module: Any | None
 ) -> dict[str, Any]:
+    """entities: 인덱스 로드 시 1회 계산한 기업명 목록(긴 이름 우선)."""
     if module:
         metric = module.canonical_metric_from_text(question)
         scope = module.normalize_scope(question, "UNKNOWN")[0]
@@ -1116,11 +1291,6 @@ def question_hints(
     else:
         metric, scope, period = None, scope_fallback(question), year_in(question)
     key = compact_key(question)
-    entities = sorted(
-        {clean_text(row["entity"]) for row in rows if clean_text(row["entity"])},
-        key=len,
-        reverse=True,
-    )
     entity = next((item for item in entities if compact_key(item) in key), None)
     return {
         "entity": entity,
@@ -1145,88 +1315,233 @@ def expanded_query(question: str, hints: dict[str, Any]) -> str:
     return "\n".join(output)
 
 
-def metadata_score(
-    row: sqlite3.Row, hints: dict[str, Any], module: Any | None
-) -> tuple[float, dict[str, bool | None]]:
-    details = {"entity": None, "metric": None, "period": None, "scope": None}
-    checks = []
-    if hints.get("entity_key"):
-        details["entity"] = compact_key(row["entity"]) == hints["entity_key"]
-        checks.append((0.45, details["entity"]))
-    if hints.get("metric"):
-        canonical = clean_text(row["metric_canonical"])
-        metric = (
-            canonical.lower()
-            if re.fullmatch(r"[a-z][a-z0-9_]*", canonical.lower())
-            else (
-                module.canonical_metric_from_text(row["metric_raw"], canonical)
-                if module
-                else canonical
-            )
-        )
-        details["metric"] = metric == hints["metric"]
-        checks.append((0.45, details["metric"]))
-    if hints.get("period_year"):
-        details["period"] = (
-            clean_text(row["period_year"]) or year_in(clean_text(row["period_raw"]))
-        ) == hints["period_year"]
-        checks.append((0.05, details["period"]))
-    if hints.get("scope") and hints["scope"] != "UNKNOWN":
-        scope = (
-            module.normalize_scope(row["scope"], "UNKNOWN")[0]
-            if module
-            else scope_fallback(row["scope"])
-        )
-        details["scope"] = scope == hints["scope"]
-        checks.append((0.05, details["scope"]))
-    denominator = sum(weight for weight, _ in checks)
-    return (
-        sum(weight for weight, matched in checks if matched) / denominator
-        if denominator
-        else 0.0
-    ), details
-
-
 def page_key(source: Any, page: Any) -> tuple[str, int] | None:
     page = safe_int(page)
     return (Path(clean_text(source)).name.casefold(), page) if source and page else None
 
 
+def fetch_rows(
+    connection: sqlite3.Connection, table: str, column: str, ids: Sequence[str]
+) -> dict[str, sqlite3.Row]:
+    """필요한 행만 id로 조회한다(전체 행을 매 질문마다 읽지 않기 위함)."""
+    output: dict[str, sqlite3.Row] = {}
+    for start in range(0, len(ids), 500):
+        chunk = list(ids[start : start + 500])
+        marks = ",".join("?" * len(chunk))
+        for row in connection.execute(
+            f"SELECT * FROM {table} WHERE {column} IN ({marks})", chunk
+        ):
+            output[str(row[column])] = row
+    return output
+
+
+class RetrievalIndex:
+    """검색에 필요한 값(임베딩 행렬·BM25 통계·메타 특징)을 1회 로드해 질문 간 재사용한다.
+
+    - 점수 계산에 필요한 가벼운 컬럼만 읽는다(raw_content / native_text / metadata_json 제외).
+      Top-K·후보 페이지에 대해서만 전체 행을 id로 다시 조회한다.
+    - 이 객체는 DB가 다시 빌드되면(build_stamp 변경) 새로 만들어진다.
+    """
+
+    EVIDENCE_COLUMNS = (
+        "evidence_id, document_id, entity, metric_raw, metric_canonical, period_raw, "
+        "period_year, scope, source_file, page, tokens_json, embedding"
+    )
+    PAGE_COLUMNS = (
+        "page_id, document_id, source_file, page, pdf_path, pdf_sha256, tokens_json, embedding"
+    )
+
+    def __init__(self, connection: sqlite3.Connection, embedder: Embedder):
+        evidence = connection.execute(
+            f"SELECT {self.EVIDENCE_COLUMNS} FROM evidence_index ORDER BY evidence_id"
+        ).fetchall()
+        pages = connection.execute(
+            f"SELECT {self.PAGE_COLUMNS} FROM page_index ORDER BY page_id"
+        ).fetchall()
+        dims = embedder.dimensions
+
+        self.evidence_ids = [str(r["evidence_id"]) for r in evidence]
+        self.document_ids = [str(r["document_id"]) for r in evidence]
+        self.evidence_page_keys = [page_key(r["source_file"], r["page"]) for r in evidence]
+        self.evidence_matrix = (
+            np.vstack([unblob(r["embedding"], dims) for r in evidence])
+            if evidence
+            else np.zeros((0, dims), dtype=np.float32)
+        )
+        self.evidence_bm25 = BM25Index([json.loads(r["tokens_json"]) for r in evidence])
+        self.entities = sorted(
+            {clean_text(r["entity"]) for r in evidence if clean_text(r["entity"])},
+            key=len,
+            reverse=True,
+        )
+        self._entity_keys = [compact_key(r["entity"]) for r in evidence]
+        self._period_years = [
+            clean_text(r["period_year"]) or year_in(clean_text(r["period_raw"]))
+            for r in evidence
+        ]
+        self._metric_inputs = [(r["metric_raw"], r["metric_canonical"]) for r in evidence]
+        self._scope_inputs = [r["scope"] for r in evidence]
+        self._metric_keys: list[Any] | None = None
+        self._scope_keys: list[Any] | None = None
+
+        self.page_ids = [str(r["page_id"]) for r in pages]
+        self.page_keys = [page_key(r["source_file"], r["page"]) for r in pages]
+        self.page_matrix = (
+            np.vstack([unblob(r["embedding"], dims) for r in pages])
+            if pages
+            else np.zeros((0, dims), dtype=np.float32)
+        )
+        self.page_bm25 = BM25Index([json.loads(r["tokens_json"]) for r in pages])
+        # 같은 키가 여러 번 나오면 뒤의 행이 우선(기존 dict 구성과 동일)
+        self.page_by_key = {
+            key: row for key, row in zip(self.page_keys, pages) if key is not None
+        }
+
+    def metadata_scores(
+        self, hints: dict[str, Any], module: Any | None
+    ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+        """질문 힌트와 각 근거 행의 메타 일치도. 질문과 무관한 행 특징은 1회만 계산한다."""
+        count = len(self.evidence_ids)
+        checks: list[tuple[str, float, np.ndarray]] = []
+        if hints.get("entity_key"):
+            checks.append(
+                (
+                    "entity",
+                    0.45,
+                    np.fromiter(
+                        (k == hints["entity_key"] for k in self._entity_keys),
+                        dtype=bool,
+                        count=count,
+                    ),
+                )
+            )
+        if hints.get("metric"):
+            if self._metric_keys is None:
+                keys = []
+                for raw, canonical_value in self._metric_inputs:
+                    canonical = clean_text(canonical_value)
+                    keys.append(
+                        canonical.lower()
+                        if re.fullmatch(r"[a-z][a-z0-9_]*", canonical.lower())
+                        else (
+                            module.canonical_metric_from_text(raw, canonical)
+                            if module
+                            else canonical
+                        )
+                    )
+                self._metric_keys = keys
+            checks.append(
+                (
+                    "metric",
+                    0.45,
+                    np.fromiter(
+                        (k == hints["metric"] for k in self._metric_keys),
+                        dtype=bool,
+                        count=count,
+                    ),
+                )
+            )
+        if hints.get("period_year"):
+            checks.append(
+                (
+                    "period",
+                    0.05,
+                    np.fromiter(
+                        (v == hints["period_year"] for v in self._period_years),
+                        dtype=bool,
+                        count=count,
+                    ),
+                )
+            )
+        if hints.get("scope") and hints["scope"] != "UNKNOWN":
+            if self._scope_keys is None:
+                self._scope_keys = [
+                    module.normalize_scope(value, "UNKNOWN")[0]
+                    if module
+                    else scope_fallback(value)
+                    for value in self._scope_inputs
+                ]
+            checks.append(
+                (
+                    "scope",
+                    0.05,
+                    np.fromiter(
+                        (k == hints["scope"] for k in self._scope_keys),
+                        dtype=bool,
+                        count=count,
+                    ),
+                )
+            )
+        denominator = sum(weight for _, weight, _ in checks)
+        score = np.zeros(count, dtype=np.float64)
+        if denominator:
+            for _, weight, matched in checks:
+                score += weight * matched
+            score = score / denominator
+        return score, {name: matched for name, _, matched in checks}
+
+    @staticmethod
+    def match_details(matches: dict[str, np.ndarray], index: int) -> dict[str, bool | None]:
+        details: dict[str, bool | None] = {
+            "entity": None,
+            "metric": None,
+            "period": None,
+            "scope": None,
+        }
+        for name, matched in matches.items():
+            details[name] = bool(matched[index])
+        return details
+
+
+_INDEX_CACHE: dict[tuple, RetrievalIndex] = {}
+
+
+def get_index(
+    connection: sqlite3.Connection, db: Path, embedder: Embedder, module: Any | None
+) -> RetrievalIndex:
+    stamp = get_meta(connection, "build_stamp")
+    key = (str(db.resolve()), stamp, embedder.model, embedder.dimensions, module is not None)
+    if stamp and key in _INDEX_CACHE:
+        return _INDEX_CACHE[key]
+    index = RetrievalIndex(connection, embedder)
+    if stamp:  # 빌드 시각을 알 수 있을 때만 캐시(오래된 DB의 stale 방지)
+        _INDEX_CACHE.clear()
+        _INDEX_CACHE[key] = index
+    return index
+
+
 def select_pages(
-    rows: Sequence[sqlite3.Row],
+    index: RetrievalIndex,
+    connection: sqlite3.Connection,
     page_scores: np.ndarray,
     page_dense_scores: np.ndarray,
     page_lexical_scores: np.ndarray,
-    evidence_rows: Sequence[sqlite3.Row],
     evidence_scores: np.ndarray,
     candidate_k: int,
     images: Path,
     dpi: int,
+    pdfs: PdfCache | None = None,
 ) -> list[PageCandidate]:
     evidence_prior = defaultdict(float)
-    for index in np.argsort(-evidence_scores)[: max(candidate_k * 4, 40)]:
-        key = page_key(
-            evidence_rows[int(index)]["source_file"], evidence_rows[int(index)]["page"]
-        )
+    for position in np.argsort(-evidence_scores)[: max(candidate_k * 4, 40)]:
+        key = index.evidence_page_keys[int(position)]
         if key:
             evidence_prior[key] = max(
-                evidence_prior[key], float(evidence_scores[int(index)])
+                evidence_prior[key], float(evidence_scores[int(position)])
             )
-    ranked = []
-    for index, row in enumerate(rows):
-        ranked.append(
-            (
-                max(
-                    float(page_scores[index]),
-                    evidence_prior.get(page_key(row["source_file"], row["page"]), 0),
-                ),
-                index,
-            )
-        )
-    ranked.sort(key=lambda pair: (-pair[0], str(rows[pair[1]]["page_id"])))
+    ranked = [
+        (max(float(page_scores[i]), evidence_prior.get(key, 0)), i)
+        for i, key in enumerate(index.page_keys)
+    ]
+    ranked.sort(key=lambda pair: (-pair[0], index.page_ids[pair[1]]))
+    chosen = ranked[:candidate_k]
+    # 후보 페이지의 전체 행(native_text 포함)만 조회한다.
+    full_rows = fetch_rows(
+        connection, "page_index", "page_id", [index.page_ids[i] for _, i in chosen]
+    )
     output = []
-    for prior, index in ranked[:candidate_k]:
-        row = rows[index]
+    for prior, i in chosen:
+        row = full_rows[index.page_ids[i]]
         path = image_path(
             images,
             str(row["document_id"]),
@@ -1234,13 +1549,13 @@ def select_pages(
             str(row["pdf_sha256"]),
             dpi,
         )
-        render_page(Path(str(row["pdf_path"])), int(row["page"]), path, dpi)
+        render_page(Path(str(row["pdf_path"])), int(row["page"]), path, dpi, pdfs)
         output.append(
             PageCandidate(
                 row=row,
-                base_score=float(page_scores[index]),
-                dense_score=float(page_dense_scores[index]),
-                lexical_score=float(page_lexical_scores[index]),
+                base_score=float(page_scores[i]),
+                dense_score=float(page_dense_scores[i]),
+                lexical_score=float(page_lexical_scores[i]),
                 prior_score=prior,
                 image_path=path,
             )
@@ -1251,9 +1566,10 @@ def select_pages(
 def diverse(
     candidates: Sequence[dict[str, Any]], top_k: int, maximum: int
 ) -> list[dict[str, Any]]:
+    """candidates: 점수순으로 정렬된 {"evidence_id", "document_id", ...} 항목."""
     selected, used, counts = [], set(), Counter()
     for item in candidates:
-        document = clean_text(item["metadata"].get("document_id")) or "UNKNOWN"
+        document = clean_text(item.get("document_id")) or "UNKNOWN"
         if item["evidence_id"] in used or counts[document] >= maximum:
             continue
         selected.append(item)
@@ -1288,69 +1604,46 @@ def retrieve(
     page_only_threshold: float,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     connection = connect_db(db)
+    pdfs = PdfCache()
     try:
         initialize_schema(connection)
         validate_index(connection, embedder)
-        evidence_rows = connection.execute(
-            "SELECT * FROM evidence_index ORDER BY evidence_id"
-        ).fetchall()
-        original_pages = connection.execute(
-            "SELECT * FROM page_index ORDER BY page_id"
-        ).fetchall()
-        if len(evidence_rows) < top_k or not original_pages:
-            raise ValueError(
-                f"insufficient index: evidence={len(evidence_rows)}, pages={len(original_pages)}"
-            )
         module = load_script04()
-        hints = question_hints(question, evidence_rows, module)
+        index = get_index(connection, db, embedder, module)
+        evidence_count, page_count = len(index.evidence_ids), len(index.page_ids)
+        if evidence_count < top_k or not page_count:
+            raise ValueError(
+                f"insufficient index: evidence={evidence_count}, pages={page_count}"
+            )
+        hints = question_hints(question, index.entities, module)
         query_text = expanded_query(question, hints)
         query_vector = embedder.embed_texts([query_text])[0]
         query_tokens = tokenize(query_text)
 
-        evidence_dense_raw = (
-            np.vstack(
-                [unblob(row["embedding"], embedder.dimensions) for row in evidence_rows]
-            )
-            @ query_vector
-        )
-        evidence_lexical_raw = bm25(
-            query_tokens, [json.loads(row["tokens_json"]) for row in evidence_rows]
-        )
-        evidence_metadata = np.zeros(len(evidence_rows))
-        match_details = []
-        for index, row in enumerate(evidence_rows):
-            evidence_metadata[index], details = metadata_score(row, hints, module)
-            match_details.append(details)
+        evidence_dense_raw = index.evidence_matrix @ query_vector
+        evidence_lexical_raw = index.evidence_bm25.scores(query_tokens)
+        evidence_metadata, metadata_matches = index.metadata_scores(hints, module)
         evidence_base = (
             ew[0] * score01(evidence_dense_raw)
             + ew[1] * score01(evidence_lexical_raw)
             + ew[2] * evidence_metadata
         )
 
-        page_dense_raw = (
-            np.vstack(
-                [
-                    unblob(row["embedding"], embedder.dimensions)
-                    for row in original_pages
-                ]
-            )
-            @ query_vector
-        )
-        page_lexical_raw = bm25(
-            query_tokens, [json.loads(row["tokens_json"]) for row in original_pages]
-        )
+        page_dense_raw = index.page_matrix @ query_vector
+        page_lexical_raw = index.page_bm25.scores(query_tokens)
         page_base = pw[0] * score01(page_dense_raw) + pw[1] * score01(page_lexical_raw)
 
         candidates = select_pages(
-            rows=original_pages,
-            page_scores=page_base,
-            page_dense_scores=page_dense_raw,
-            page_lexical_scores=page_lexical_raw,
-            evidence_rows=evidence_rows,
-            evidence_scores=evidence_base,
-            candidate_k=candidate_k,
-            images=images,
-            dpi=dpi,
+            index,
+            connection,
+            page_base,
+            page_dense_raw,
+            page_lexical_raw,
+            evidence_base,
+            candidate_k,
+            images,
+            dpi,
+            pdfs,
         )
 
         visual = (
@@ -1397,55 +1690,22 @@ def retrieve(
                 "multimodal_page_score": fused,
             }
 
-        all_results = []
-        for index, row in enumerate(evidence_rows):
-            detail = page_details.get(page_key(row["source_file"], row["page"]))
-            page_score = float(detail["multimodal_page_score"]) if detail else 0.0
-            final_score = fw[0] * float(evidence_base[index]) + fw[1] * page_score
-            metadata = json.loads(row["metadata_json"])
-            metadata.update(
-                {
-                    "retrieval_unit_type": "structured_evidence",
-                    "entity": str(row["entity"]),
-                    "metric_raw": str(row["metric_raw"]),
-                    "metric_canonical": str(row["metric_canonical"]),
-                    "period_raw": str(row["period_raw"]),
-                    "period_year": str(row["period_year"]),
-                    "scope": str(row["scope"]),
-                    "statement": str(row["statement"]),
-                    "version": str(row["version"]),
-                    "modality": str(row["modality"]),
-                    "document_id": str(row["document_id"]),
-                    "source_file": str(row["source_file"]),
-                    "page": row["page"],
-                    "bbox_pdf": json.loads(row["bbox_json"])
-                    if row["bbox_json"]
-                    else None,
-                    "pdf_path": str(row["pdf_path"]),
-                    "page_image_path": detail["page_image_path"] if detail else None,
-                    "vision": detail["vision"] if detail else None,
-                    "evidence_dense_cosine": round(float(evidence_dense_raw[index]), 8),
-                    "evidence_lexical_bm25": round(
-                        float(evidence_lexical_raw[index]), 8
-                    ),
-                    "metadata_match_score": round(float(evidence_metadata[index]), 8),
-                    "metadata_match_details": match_details[index],
-                    "evidence_base_score": round(float(evidence_base[index]), 8),
-                    "multimodal_page_score": round(page_score, 8),
-                    "retrieval_score": round(final_score, 8),
-                }
-            )
-            all_results.append(
-                {
-                    "evidence_id": str(row["evidence_id"]),
-                    "content": str(row["raw_content"]),
-                    "raw_content": str(row["raw_content"]),
-                    "metadata": metadata,
-                }
-            )
+        # --- 전체 근거에 대한 최종 점수는 벡터 연산으로 계산하고,
+        #     결과 dict(메타데이터 포함)는 선택된 Top-K에 대해서만 만든다.
+        page_score_by_key = {
+            key: float(detail["multimodal_page_score"])
+            for key, detail in page_details.items()
+        }
+        page_score_vector = np.array(
+            [page_score_by_key.get(key, 0.0) for key in index.evidence_page_keys],
+            dtype=np.float64,
+        )
+        final_scores = fw[0] * evidence_base + fw[1] * page_score_vector
+        order = np.argsort(-final_scores, kind="stable")  # 동점은 evidence_id 순(행 순서)
 
+        page_only_entries = []
         if allow_page_only:
-            for key, detail in page_details.items():
+            for detail in page_details.values():
                 result = detail["vision"]
                 modalities = set(result.get("modalities") or [])
                 visible = clean_content(result.get("visual_evidence_text"))
@@ -1457,11 +1717,95 @@ def retrieve(
                 ):
                     continue
                 raw = f"[VLM visual evidence]\n{visible}\n\n[Native PDF text]\n{clip(detail['native_text'], 5000)}"
-                all_results.append(
+                page_only_entries.append(
                     {
                         "evidence_id": "visual_" + detail["page_id"],
-                        "content": raw,
-                        "raw_content": raw,
+                        "document_id": detail["document_id"],
+                        "score": round(float(detail["multimodal_page_score"]), 8),
+                        "detail": detail,
+                        "raw": raw,
+                        "visible": visible,
+                    }
+                )
+
+        pool = min(evidence_count, max(top_k * 200, 2000))
+        while True:
+            entries = [
+                {
+                    "evidence_id": index.evidence_ids[int(i)],
+                    "document_id": index.document_ids[int(i)],
+                    "score": round(float(final_scores[int(i)]), 8),
+                    "row_index": int(i),
+                }
+                for i in order[:pool]
+            ] + page_only_entries
+            entries.sort(key=lambda e: (-e["score"], str(e["evidence_id"])))
+            selected_entries = diverse(entries, top_k, max_per_document)
+            if len(selected_entries) == top_k or pool >= evidence_count:
+                break
+            pool = evidence_count  # 다양성 제약으로 모자라면 전체에서 다시 선택
+        if len(selected_entries) != top_k:
+            raise ValueError(f"cannot construct Top-{top_k}: {len(selected_entries)}")
+
+        full_evidence = fetch_rows(
+            connection,
+            "evidence_index",
+            "evidence_id",
+            [e["evidence_id"] for e in selected_entries if "row_index" in e],
+        )
+        selected = []
+        for entry in selected_entries:
+            if "row_index" in entry:
+                i = entry["row_index"]
+                row = full_evidence[entry["evidence_id"]]
+                detail = page_details.get(page_key(row["source_file"], row["page"]))
+                page_score = float(detail["multimodal_page_score"]) if detail else 0.0
+                metadata = json.loads(row["metadata_json"])
+                metadata.update(
+                    {
+                        "retrieval_unit_type": "structured_evidence",
+                        "entity": str(row["entity"]),
+                        "metric_raw": str(row["metric_raw"]),
+                        "metric_canonical": str(row["metric_canonical"]),
+                        "period_raw": str(row["period_raw"]),
+                        "period_year": str(row["period_year"]),
+                        "scope": str(row["scope"]),
+                        "statement": str(row["statement"]),
+                        "version": str(row["version"]),
+                        "modality": str(row["modality"]),
+                        "document_id": str(row["document_id"]),
+                        "source_file": str(row["source_file"]),
+                        "page": row["page"],
+                        "bbox_pdf": json.loads(row["bbox_json"])
+                        if row["bbox_json"]
+                        else None,
+                        "pdf_path": str(row["pdf_path"]),
+                        "page_image_path": detail["page_image_path"] if detail else None,
+                        "vision": detail["vision"] if detail else None,
+                        "evidence_dense_cosine": round(float(evidence_dense_raw[i]), 8),
+                        "evidence_lexical_bm25": round(float(evidence_lexical_raw[i]), 8),
+                        "metadata_match_score": round(float(evidence_metadata[i]), 8),
+                        "metadata_match_details": index.match_details(metadata_matches, i),
+                        "evidence_base_score": round(float(evidence_base[i]), 8),
+                        "multimodal_page_score": round(page_score, 8),
+                        "retrieval_score": entry["score"],
+                    }
+                )
+                selected.append(
+                    {
+                        "evidence_id": str(row["evidence_id"]),
+                        "content": str(row["raw_content"]),
+                        "raw_content": str(row["raw_content"]),
+                        "metadata": metadata,
+                    }
+                )
+            else:
+                detail, result = entry["detail"], entry["detail"]["vision"]
+                selected.append(
+                    {
+                        "evidence_id": entry["evidence_id"],
+                        "content": entry["raw"],
+                        "raw_content": entry["raw"],
                         "metadata": {
                             "retrieval_unit_type": "visual_page_evidence",
                             "entity": "",
@@ -1484,32 +1828,19 @@ def retrieve(
                             "multimodal_page_score": round(
                                 float(detail["multimodal_page_score"]), 8
                             ),
-                            "retrieval_score": round(
-                                float(detail["multimodal_page_score"]), 8
-                            ),
+                            "retrieval_score": entry["score"],
                         },
                     }
                 )
 
-        all_results.sort(
-            key=lambda item: (
-                -float(item["metadata"]["retrieval_score"]),
-                str(item["evidence_id"]),
-            )
-        )
-        selected = diverse(all_results, top_k, max_per_document)
-        if len(selected) != top_k:
-            raise ValueError(f"cannot construct Top-{top_k}: {len(selected)}")
-        page_row_lookup = {
-            page_key(row["source_file"], row["page"]): row for row in original_pages
-        }
         for rank, item in enumerate(selected, 1):
             metadata = item["metadata"]
             metadata["retrieval_rank"] = rank
-            row = page_row_lookup.get(
+            row = index.page_by_key.get(
                 page_key(metadata.get("source_file"), metadata.get("page"))
             )
             if row:
+                # 후보 페이지는 select_pages에서 이미 렌더링됨(파일 존재 시 즉시 반환)
                 path = image_path(
                     images,
                     str(row["document_id"]),
@@ -1517,7 +1848,7 @@ def retrieve(
                     str(row["pdf_sha256"]),
                     dpi,
                 )
-                render_page(Path(str(row["pdf_path"])), int(row["page"]), path, dpi)
+                render_page(Path(str(row["pdf_path"])), int(row["page"]), path, dpi, pdfs)
                 metadata["page_image_path"] = str(path)
                 crop = render_crop(
                     Path(str(row["pdf_path"])),
@@ -1526,6 +1857,7 @@ def retrieve(
                     path.parent
                     / f"crop_{int(row['page']):04d}_{stable_hash(item['evidence_id'], length=10)}.jpg",
                     dpi,
+                    pdfs,
                 )
                 metadata["evidence_crop_path"] = str(crop) if crop else None
             metadata["embedding_model"], metadata["embedding_dimensions"] = (
@@ -1540,8 +1872,8 @@ def retrieve(
             "expanded_query_text": query_text,
             "question_hints": hints,
             "database_counts": {
-                "evidence": len(evidence_rows),
-                "pages": len(original_pages),
+                "evidence": evidence_count,
+                "pages": page_count,
             },
             "weights": {
                 "evidence": {"dense": ew[0], "lexical": ew[1], "metadata": ew[2]},
@@ -1557,6 +1889,8 @@ def retrieve(
                 "model": vision.model if vision else None,
                 "prompt_version": VISION_PROMPT_VERSION if vision else None,
                 "candidate_count": len(candidates),
+                "cache_hits": getattr(vision, "hits", None),
+                "cache_misses": getattr(vision, "misses", None),
                 "pages": [
                     {
                         key: detail[key]
@@ -1592,6 +1926,7 @@ def retrieve(
         }
         return selected, diagnostics
     finally:
+        pdfs.close()
         connection.close()
 
 
@@ -1655,28 +1990,25 @@ def run_stage04(
     timeout: float,
     max_output_tokens: int,
     no_cache: bool,
-) -> None:
-    if not SCRIPT04.exists():
+) -> dict[str, Any]:
+    """04를 같은 프로세스에서 호출한다(이미 로드된 모듈 재사용, 인터프리터·모듈 재기동 없음)."""
+    module = load_script04()
+    if module is None:
         raise FileNotFoundError(f"Script 04 not found: {SCRIPT04}")
-    command = [
-        sys.executable,
-        str(SCRIPT04),
-        "--input",
-        str(retrieval_input),
-        "--output-dir",
-        str(output),
-        "--model",
-        model,
-        "--workers",
-        str(workers),
-        "--timeout",
-        str(timeout),
-        "--max-output-tokens",
-        str(max_output_tokens),
-    ]
-    if no_cache:
-        command.append("--no-cache")
-    subprocess.run(command, cwd=BASE_DIR, check=True)
+    namespace = argparse.Namespace(
+        input=retrieval_input,
+        output_dir=output,
+        model=model,
+        workers=workers,
+        timeout=timeout,
+        max_attempts=3,
+        max_output_tokens=max_output_tokens,
+        max_question_chars=6000,
+        max_evidence_chars=20000,
+        allow_variable_k=False,
+        no_cache=no_cache,
+    )
+    return module.run_normalization(namespace)
 
 
 class HashingEmbedder:
@@ -1818,7 +2150,7 @@ def self_test() -> None:
     print("[SELF-TEST SUCCESS] evidence + PDF page + image rerank + fusion + Top-5")
 
 
-def parse_args() -> argparse.Namespace:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="CAUSE-RAG PDF-grounded multimodal hybrid retrieval"
     )
@@ -1897,8 +2229,17 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_NORMALIZATION_MAX_OUTPUT_TOKENS,
     )
     parser.add_argument("--normalization-no-cache", action="store_true")
+    parser.add_argument(
+        "--no-vision-cache",
+        action="store_true",
+        help="같은 질문·페이지의 비전 재순위화 결과 캐시를 사용하지 않음",
+    )
     parser.add_argument("--self-test", action="store_true")
-    return parser.parse_args()
+    return parser
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    return build_parser().parse_args(argv)
 
 
 def resolve_question(args: argparse.Namespace) -> str:
@@ -1953,88 +2294,125 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("vision/page threshold must be in [0,1]")
 
 
+class RetrievalSession:
+    """임베더·비전·인덱스를 한 번만 준비하고 여러 질문을 처리한다.
+
+    통합 main과 05 단독 실행이 같은 경로를 사용한다.
+    """
+
+    def __init__(self, args: argparse.Namespace, build: bool):
+        validate_args(args)
+        self.args = args
+        self.sources = [path.resolve() for path in (args.source or [DEFAULT_SOURCE])]
+        self.pdfs = discover_pdfs(args.pdf, args.pdf_dir.resolve())
+        self.embedder = OpenAIEmbedder(
+            args.embedding_model, args.dimensions, args.timeout, args.max_attempts
+        )
+        self.build_summary: dict[str, Any] | None = None
+        if build:
+            print("[INDEX] structured evidence + original PDF pages")
+            self.build_summary = build_index(
+                self.sources,
+                self.pdfs,
+                args.db.resolve(),
+                self.embedder,
+                args.embedding_batch_size,
+                args.max_embedding_chars,
+                args.force_reembed,
+                args.allow_missing_pdf,
+            )
+            state = (
+                "up-to-date (rebuild skipped)"
+                if self.build_summary.get("rebuild_skipped")
+                else "built"
+            )
+            print(
+                f"[INDEX SUCCESS] {state} evidence={self.build_summary['evidence']['evidence_count']} "
+                f"pages={self.build_summary['pages']['page_count']}"
+            )
+        self.vision: Any = None
+        if not args.skip_vision_rerank:
+            self.vision = OpenAIVisionReranker(
+                model=args.vision_model,
+                detail=args.vision_detail,
+                batch_size=args.vision_batch_size,
+                timeout=args.timeout,
+                attempts=args.max_attempts,
+                fallback=args.allow_vision_fallback,
+                max_output_tokens=args.vision_max_output_tokens,
+            )
+            if not args.no_vision_cache:
+                self.vision = CachedVision(
+                    self.vision, args.db.resolve().parent / "vision_cache.json"
+                )
+
+    def query(
+        self,
+        question: str,
+        retrieval_output: Path,
+        context_output: Path,
+        diagnostics_output: Path,
+    ) -> list[dict[str, Any]]:
+        args = self.args
+        results, diagnostics = retrieve(
+            args.db.resolve(),
+            question,
+            self.embedder,
+            self.vision,
+            args.top_k,
+            (
+                args.evidence_dense_weight,
+                args.evidence_lexical_weight,
+                args.evidence_metadata_weight,
+            ),
+            (args.page_dense_weight, args.page_lexical_weight),
+            (args.evidence_fusion_weight, args.page_fusion_weight),
+            args.vision_weight,
+            args.vision_candidate_k,
+            args.max_per_document,
+            args.image_dir.resolve(),
+            args.render_dpi,
+            args.allow_page_only,
+            args.page_only_threshold,
+        )
+        diagnostics["build"] = self.build_summary
+        save_outputs(
+            retrieval_output.resolve(),
+            context_output.resolve(),
+            diagnostics_output.resolve(),
+            question,
+            results,
+            diagnostics,
+        )
+        return results
+
+
 def main() -> None:
     args = parse_args()
     if args.self_test:
         self_test()
         return
     validate_args(args)
-    sources = [path.resolve() for path in (args.source or [DEFAULT_SOURCE])]
-    pdfs = discover_pdfs(args.pdf, args.pdf_dir.resolve())
     question = resolve_question(args) if args.mode in {"query", "run"} else None
-    embedder = OpenAIEmbedder(
-        args.embedding_model, args.dimensions, args.timeout, args.max_attempts
-    )
     print("=" * 92)
     print("CAUSE-RAG | Stage 05 PDF-grounded Multimodal Hybrid Retrieval")
     print("=" * 92)
-    print(f"Mode={args.mode} | PDFs={len(pdfs)} | DB={args.db.resolve()}")
     print(
-        f"Embedding={args.embedding_model}/{args.dimensions} | Vision={'disabled' if args.skip_vision_rerank else args.vision_model}"
+        f"Mode={args.mode} | DB={args.db.resolve()} | Embedding={args.embedding_model}/{args.dimensions} "
+        f"| Vision={'disabled' if args.skip_vision_rerank else args.vision_model}"
     )
     print("Gold index=disabled")
-    build_summary = None
-    if args.mode == "build" or (args.mode == "run" and not args.skip_build):
-        print("[INDEX] structured evidence + original PDF pages")
-        build_summary = build_index(
-            sources,
-            pdfs,
-            args.db.resolve(),
-            embedder,
-            args.embedding_batch_size,
-            args.max_embedding_chars,
-            args.force_reembed,
-            args.allow_missing_pdf,
-        )
-        print(
-            f"[INDEX SUCCESS] evidence={build_summary['evidence']['evidence_count']} pages={build_summary['pages']['page_count']}"
-        )
+    build = args.mode == "build" or (args.mode == "run" and not args.skip_build)
+    session = RetrievalSession(args, build=build)
     if args.mode == "build":
-        save_json(args.diagnostics_output.resolve(), {"build": build_summary})
+        save_json(args.diagnostics_output.resolve(), {"build": session.build_summary})
         return
     assert question is not None
-    vision = (
-        None
-        if args.skip_vision_rerank
-        else OpenAIVisionReranker(
-            model=args.vision_model,
-            detail=args.vision_detail,
-            batch_size=args.vision_batch_size,
-            timeout=args.timeout,
-            attempts=args.max_attempts,
-            fallback=args.allow_vision_fallback,
-            max_output_tokens=args.vision_max_output_tokens,
-        )
-    )
-    results, diagnostics = retrieve(
-        args.db.resolve(),
+    results = session.query(
         question,
-        embedder,
-        vision,
-        args.top_k,
-        (
-            args.evidence_dense_weight,
-            args.evidence_lexical_weight,
-            args.evidence_metadata_weight,
-        ),
-        (args.page_dense_weight, args.page_lexical_weight),
-        (args.evidence_fusion_weight, args.page_fusion_weight),
-        args.vision_weight,
-        args.vision_candidate_k,
-        args.max_per_document,
-        args.image_dir.resolve(),
-        args.render_dpi,
-        args.allow_page_only,
-        args.page_only_threshold,
-    )
-    diagnostics["build"] = build_summary
-    save_outputs(
-        args.retrieval_output.resolve(),
-        args.context_output.resolve(),
-        args.diagnostics_output.resolve(),
-        question,
-        results,
-        diagnostics,
+        args.retrieval_output,
+        args.context_output,
+        args.diagnostics_output,
     )
     for item in results:
         m = item["metadata"]
