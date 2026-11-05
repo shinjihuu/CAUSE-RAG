@@ -113,7 +113,7 @@ DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_MAX_OUTPUT_TOKENS = 2600
 
 SCHEMA_VERSION = "cause-rag-normalization-v1.1"
-PROMPT_VERSION = "cause-rag-structuring-v1.2"
+PROMPT_VERSION = "cause-rag-structuring-v1.3-sourceguard"
 
 
 # ==============================================================================
@@ -277,6 +277,15 @@ METRIC_ALIASES: dict[str, tuple[str, ...]] = {
     "total_assets": ("자산총계", "총자산", "total assets"),
     "total_liabilities": ("부채총계", "총부채", "total liabilities"),
     "total_equity": ("자본총계", "총자본", "total equity", "shareholders equity"),
+    "current_assets": ("유동자산", "유동 자산", "current assets"),
+    "noncurrent_assets": ("비유동자산", "비유동 자산", "non-current assets", "noncurrent assets"),
+    "current_liabilities": ("유동부채", "유동 부채", "current liabilities"),
+    "noncurrent_liabilities": ("비유동부채", "비유동 부채", "non-current liabilities", "noncurrent liabilities"),
+    "retained_earnings": ("이익잉여금", "이익 잉여금", "retained earnings"),
+    "short_term_financial_products": (
+        "단기금융상품", "단기 금융상품", "short-term financial products",
+        "short term financial products",
+    ),
     "cash_and_cash_equivalents": (
         "현금및현금성자산",
         "현금 및 현금성자산",
@@ -1379,26 +1388,61 @@ def compare_known(left: Any, right: Any) -> bool | None:
     return left == right
 
 
+def _period_day_bounds(token: Any):
+    """Interpret a fiscal year as Jan 1–Dec 31 (and a day as itself).
+
+    This fixes a false mismatch between '2024' and '2024_12_31' while
+    retaining exact period-end matching for point-in-time balance-sheet facts.
+    An unknown or malformed period never becomes a positive match.
+    """
+    from datetime import date
+
+    value, precision = parse_period_token(token)
+    if value is None:
+        return None
+    parts = [int(item) for item in value.split("_")]
+    year = parts[0]
+    if precision == "YEAR":
+        return date(year, 1, 1), date(year, 12, 31)
+    if precision == "MONTH":
+        month = parts[1]
+        return date(year, month, 1), date(year, month, calendar.monthrange(year, month)[1])
+    if precision == "DAY":
+        exact = date(year, parts[1], parts[2])
+        return exact, exact
+    return None
+
+
+def _period_conditions_match(record: dict[str, Any], question: dict[str, Any]) -> bool | None:
+    period_type = record.get("period_type")
+    question_type = question.get("period_type")
+    if not period_type or not question_type or "UNKNOWN" in {period_type, question_type}:
+        return None
+    if period_type != question_type:
+        return False
+
+    ev_start = _period_day_bounds(record.get("period_start"))
+    ev_end = _period_day_bounds(record.get("period_end"))
+    q_start = _period_day_bounds(question.get("period_start"))
+    q_end = _period_day_bounds(question.get("period_end"))
+    if not all((ev_start, ev_end, q_start, q_end)):
+        return None
+    if period_type == "POINT_IN_TIME":
+        return ev_end[1] == q_end[1]
+    if period_type == "DURATION":
+        return ev_start[0] == q_start[0] and ev_end[1] == q_end[1]
+    return (
+        record.get("period_start") == question.get("period_start")
+        and record.get("period_end") == question.get("period_end")
+    )
+
+
 def deterministic_question_match(
     record: dict[str, Any], question_anchor: dict[str, Any] | None
 ) -> dict[str, bool | None]:
     if not question_anchor:
         return {"entity": None, "metric": None, "period": None, "scope": None}
-    period_left = (
-        record.get("period_start"),
-        record.get("period_end"),
-        record.get("period_type"),
-    )
-    period_right = (
-        question_anchor.get("period_start"),
-        question_anchor.get("period_end"),
-        question_anchor.get("period_type"),
-    )
-    period_match = (
-        None
-        if any(value in {None, "UNKNOWN"} for value in (*period_left, *period_right))
-        else period_left == period_right
-    )
+    period_match = _period_conditions_match(record, question_anchor)
     return {
         "entity": compare_known(
             record.get("entity_key"), question_anchor.get("entity_key")
@@ -1824,6 +1868,38 @@ def apply_metadata_fallback(
         data["extraction_status"] = "OK"
         data["warnings"] = list(data.get("warnings") or []) + [
             "extraction_status recovered from explicit parser metadata"
+        ]
+
+    # 출처에 의해 명시적으로 확인되는 값만 질문 기반 추출보다 우선한다.
+    source_scope = str(metadata.get("scope") or "").upper()
+    scope_method = str(metadata.get("scope_inference_method") or "")
+    if (
+        source_scope in {"CFS", "OFS"}
+        and scope_method in {
+            "explicit_consolidated_context",
+            "numbered_separate_heading",
+            "script01_scope_hint",
+        }
+    ):
+        data["scope_raw"] = source_scope
+        data["scope_canonical"] = source_scope
+        data["scope_basis"] = "METADATA"
+        data["warnings"] = list(data.get("warnings") or []) + [
+            "trusted source scope override"
+        ]
+
+    fiscal_year = str(metadata.get("period_year") or "")
+    fiscal_raw = str(metadata.get("period_raw") or "")
+    if (
+        metadata.get("period_inference_method") == "fiscal_term_map"
+        and re.fullmatch(r"20\d{2}", fiscal_year)
+        and re.search(r"제\s*\d+\s*기", fiscal_raw)
+    ):
+        data["period_start_hint"] = fiscal_year
+        data["period_end_hint"] = fiscal_year
+        data["period_basis"] = "METADATA"
+        data["warnings"] = list(data.get("warnings") or []) + [
+            "trusted fiscal term year override"
         ]
     return LLMExtraction.model_validate(data)
 
