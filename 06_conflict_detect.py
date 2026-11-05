@@ -44,7 +44,7 @@ OUTPUT_PATH = OUTPUT_DIR / "conflict_result.json"
 COMPARISON_KEYS = [
     "entity", "metric",
     "period_start", "period_end", "period_type",
-    "scope", "unit_normalized", "value_normalized",
+    "scope", "value_type", "unit_normalized", "value_normalized",
 ]
 
 # 근거끼리 비교할 때 분포를 기록할 키
@@ -99,65 +99,79 @@ _QUARTER_RE = re.compile(r"^\s*(\d{4})[-_ ]?Q([1-4])\s*$", re.IGNORECASE)
 PERIOD_KEYS = ("period_start", "period_end")
 
 
-def parse_period(value: Any) -> Optional[Tuple[Tuple[int, int], Tuple[int, int]]]:
-    """
-    기간 문자열을 (하한, 상한) 월 단위 튜플 ((년, 월), (년, 월))로 변환.
-      "2025"      -> ((2025, 1),  (2025, 12))
-      "2025_12"   -> ((2025, 12), (2025, 12))
-      "2025_Q1"   -> ((2025, 1),  (2025, 3))
-    파싱 불가하면 None.
-    """
-    s = str(value).strip()
+def parse_period(value: Any):
+    """YYYY/YYYY_MM/YYYY_MM_DD/YYYY_Qn을 실제 날짜 구간으로 변환."""
+    import calendar
+    from datetime import date
 
-    m = _QUARTER_RE.match(s)
-    if m:
-        y, q = int(m.group(1)), int(m.group(2))
-        return (y, 3 * q - 2), (y, 3 * q)
+    s = str(value or "").strip().replace("-", "_")
+    q = re.fullmatch(r"(\d{4})_?Q([1-4])", s, re.I)
+    if q:
+        year, quarter = map(int, q.groups())
+        first_month = 3 * quarter - 2
+        last_month = first_month + 2
+        return (
+            date(year, first_month, 1),
+            date(year, last_month, calendar.monthrange(year, last_month)[1]),
+        )
 
-    m = _PERIOD_RE.match(s)
-    if m:
-        y = int(m.group(1))
-        if m.group(2) is None:
-            return (y, 1), (y, 12)
-        mon = int(m.group(2))
-        if 1 <= mon <= 12:
-            return (y, mon), (y, mon)
+    match = re.fullmatch(
+        r"(\d{4})(?:[_./](\d{1,2}))?(?:[_./](\d{1,2}))?", s
+    )
+    if not match:
+        return None
+
+    year = int(match.group(1))
+    month = int(match.group(2)) if match.group(2) else None
+    day = int(match.group(3)) if match.group(3) else None
+
+    try:
+        if month is None:
+            return date(year, 1, 1), date(year, 12, 31)
+        if day is None:
+            return (
+                date(year, month, 1),
+                date(year, month, calendar.monthrange(year, month)[1]),
+            )
+        instant = date(year, month, day)
+        return instant, instant
+    except ValueError:
+        return None
+
+
+
+def period_contained(
+    key: str, q_fields: Dict[str, Any], e_val: Any
+) -> Optional[bool]:
+    """
+    POINT_IN_TIME: 같은 기준일이어야 함.
+    DURATION: 시작일과 종료일이 각각 같아야 함.
+    연간 매출액 질문에 분기 매출액이 통과하는 것을 차단.
+    """
+    e_range = parse_period(e_val)
+    q_start = q_fields.get("period_start")
+    q_end = q_fields.get("period_end") or q_start
+    start_range = parse_period(q_start)
+    end_range = parse_period(q_end)
+
+    if e_range is None or start_range is None or end_range is None:
+        return None
+
+    period_type = str(
+        q_fields.get("period_type") or "UNKNOWN"
+    ).upper()
+
+    if period_type == "POINT_IN_TIME":
+        return e_range[1] == end_range[1]
+
+    if key == "period_start":
+        return e_range[0] == start_range[0]
+
+    if key == "period_end":
+        return e_range[1] == end_range[1]
+
     return None
 
-
-def period_contained(key: str, q_fields: Dict[str, Any], e_val: Any) -> Optional[bool]:
-    """
-    근거의 period 값(e_val)이 질문 기간 [period_start, period_end] 범위 안에 포함되는지 판단.
-    - 질문의 하한: period_start의 하한 / 상한: period_end의 상한 (period_end 없으면 period_start의 상한)
-    - 파싱 불가 -> None (호출 측에서 문자열 정확 일치로 fallback)
-    """
-    e_rng = parse_period(e_val)
-    q_start = q_fields.get("period_start")
-    q_end = q_fields.get("period_end")
-
-    q_start_rng = parse_period(q_start) if not is_empty(q_start) else None
-    q_end_rng = parse_period(q_end) if not is_empty(q_end) else None
-
-    if e_rng is None:
-        return None
-    if (not is_empty(q_start) and q_start_rng is None) or (not is_empty(q_end) and q_end_rng is None):
-        return None
-
-    lower = q_start_rng[0] if q_start_rng else None
-    if q_end_rng:
-        upper = q_end_rng[1]
-    elif q_start_rng:
-        upper = q_start_rng[1]
-    else:
-        upper = None
-
-    # period_start 근거는 시작점(하한)을, period_end 근거는 끝점(상한)을 범위에 대입
-    e_lo, e_hi = e_rng
-    if lower is not None and e_lo < lower:
-        return False
-    if upper is not None and e_hi > upper:
-        return False
-    return True
 
 
 def load_json(path: Union[str, Path]) -> Dict[str, Any]:
@@ -233,6 +247,19 @@ def match_question_evidence(question: Question, evidence: Evidence) -> Dict[str,
     for key in COMPARISON_KEYS:
         q_val = question.fields.get(key)
         e_val = evidence.fields.get(key)
+
+        # 값/단위는 질문과 비교하지 않고,
+        # 조건에 맞는 근거들 사이에서 비교한다.
+        if key in ("unit_normalized", "value_normalized"):
+            skipped.append(key)
+            details.append({
+                "key": key,
+                "question": q_val,
+                "evidence": e_val,
+                "result": "skipped",
+                "reason": "inter_evidence_only",
+            })
+            continue
 
         # 질문 값이 없거나 UNKNOWN -> 비교 제외
         if is_empty(q_val):
@@ -323,7 +350,17 @@ def compare_among_kept(kept: List[Dict[str, Any]]) -> Dict[str, Any]:
     uv = {(_norm_for_group("unit_normalized", r["evidence"].fields.get("unit_normalized")),
            _norm_for_group("value_normalized", r["evidence"].fields.get("value_normalized")))
           for r in kept}
-    group_status = "no_conflict" if len(uv) <= 1 else "apparent_conflict"
+    incomplete = any(
+        is_empty(r["evidence"].fields.get(key))
+        for r in kept
+        for key in ("unit_normalized", "value_normalized")
+    )
+
+    group_status = (
+        "insufficient" if incomplete else
+        "no_conflict" if len(uv) <= 1 else
+        "genuine_conflict"
+    )
 
     return {"group_status": group_status, "by_key": by_key}
 
@@ -343,7 +380,7 @@ def _to_output_record(ev: Evidence, label: str, res: Dict[str, Any]) -> Dict[str
                               if d["result"] == "mismatch"],
         # scope 미확정이 유일한 충돌 사유 -> 04 단계에서 scope 보강 시 되살릴 후보
         "revivable_if_scope_resolved": (res["mismatched_keys"] == ["scope"]
-                                        and label == "genuine_conflict"),
+                                        and label == "excluded_inapplicable"),
         "comparison": res["question_vs_evidence"],                 # 근거에서 비교한 내용
         "structured": ev.fields,                                   # 비교에 쓴 구조화 값
         "raw_text": ev.raw_text,
@@ -356,48 +393,93 @@ def _to_output_record(ev: Evidence, label: str, res: Dict[str, Any]) -> Dict[str
 # 7. 전체 파이프라인
 # =====================================================================
 
-def run_conflict_disambiguator(question: Question, evidences: List[Evidence]) -> Dict[str, Any]:
+def run_conflict_disambiguator(
+    question: Question, evidences: List[Evidence]
+) -> Dict[str, Any]:
     filtered = filter_evidences(question, evidences)
-    kept_cmp = compare_among_kept(filtered["kept"])
-    group_status = kept_cmp["group_status"]
 
-    no_conflict, apparent_conflict, genuine_conflict = [], [], []
+    # 필수 수치가 없는 후보 때문에 정상 후보까지 제거하지 않음.
+    valid, incomplete = [], []
+    for row in filtered["kept"]:
+        fields = row["evidence"].fields
+        if (
+            is_empty(fields.get("value_normalized"))
+            or is_empty(fields.get("unit_normalized"))
+        ):
+            incomplete.append(row)
+        else:
+            valid.append(row)
 
-    for r in filtered["kept"]:
-        rec = _to_output_record(r["evidence"], group_status, r)
-        (no_conflict if group_status == "no_conflict" else apparent_conflict).append(rec)
+    comparison = compare_among_kept(valid)
+    group_status = comparison["group_status"]
 
-    for r in filtered["excluded"]:
-        genuine_conflict.append(_to_output_record(r["evidence"], "genuine_conflict", r))
+    no_conflict = []
+    apparent_conflict = []
+    genuine_conflict = []
+    excluded_inapplicable = []
 
-    if apparent_conflict:
-        overall_status = "apparent_conflict"
+    for row in valid:
+        record = _to_output_record(
+            row["evidence"], group_status, row
+        )
+        if group_status == "genuine_conflict":
+            genuine_conflict.append(record)
+        else:
+            no_conflict.append(record)
+
+    for row in incomplete:
+        excluded_inapplicable.append(
+            _to_output_record(
+                row["evidence"], "insufficient", row
+            )
+        )
+
+    for row in filtered["excluded"]:
+        excluded_inapplicable.append(
+            _to_output_record(
+                row["evidence"], "excluded_inapplicable", row
+            )
+        )
+
+    if genuine_conflict:
+        status = "genuine_conflict"
     elif no_conflict:
-        overall_status = "no_conflict"
+        status = "no_conflict"
     else:
-        overall_status = "no_valid_candidate"
+        status = "no_valid_candidate"
 
     return {
-        "overall_status": overall_status,
+        "overall_status": status,
         "question": {
             "raw_question": question.raw_question,
             "compare_fields": question.fields,
         },
         "summary": {
             "no_conflict_count": len(no_conflict),
-            "apparent_conflict_count": len(apparent_conflict),
+            "apparent_conflict_count": 0,
             "genuine_conflict_count": len(genuine_conflict),
+            "excluded_inapplicable_count": len(excluded_inapplicable),
+            "insufficient_count": len(incomplete),
             "scope_unresolved_count": sum(
-                "scope_unresolved" in r["exclusion_reasons"] for r in genuine_conflict),
+                "scope_unresolved" in r["exclusion_reasons"]
+                for r in excluded_inapplicable
+            ),
             "revivable_evidence_ids": [
-                r["evidence_id"] for r in genuine_conflict if r["revivable_if_scope_resolved"]],
+                r["evidence_id"]
+                for r in excluded_inapplicable
+                if r["revivable_if_scope_resolved"]
+            ],
         },
-        "evidence_comparison": kept_cmp,   # kept 근거끼리 비교 내용
+        "evidence_comparison": comparison,
         "no_conflict": no_conflict,
         "apparent_conflict": apparent_conflict,
         "genuine_conflict": genuine_conflict,
-        "final_context_for_vlm": no_conflict + apparent_conflict,
+        "excluded_inapplicable": excluded_inapplicable,
+        "final_context_for_vlm": (
+            no_conflict + apparent_conflict + genuine_conflict
+        ),
     }
+
 
 
 # =====================================================================
