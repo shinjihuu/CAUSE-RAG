@@ -36,11 +36,17 @@ import contextlib
 import importlib.util
 import json
 import os
+import re
 import sys
 import time
 import traceback
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterator
+
+from cause_rag_arbitration import run_arbitration
+
+CAUSE_RAG_UPGRADE_VERSION = "cause-rag-source-identity-guards-20261105-v5"
 
 BASE_DIR = Path(__file__).resolve().parent
 PDF_DIR = BASE_DIR / "pdf_data"
@@ -52,6 +58,74 @@ DOCUMENT_MANIFEST = DATASET_DIR / "01_parsed" / "document_manifest.csv"
 STRUCTURED_EVIDENCE = DATASET_DIR / "02_structured" / "structured_evidence.jsonl"
 SHARED_CACHE_04 = DATASET_DIR / "04_normalized" / "cache"  # 실행 간 공유되는 LLM 캐시
 RUNS_DIR = DATASET_DIR / "runs"
+
+
+def _scope_from_pdf_heading(line: str) -> str | None:
+    """Recognize *section headings*, not loose financial terms in tables."""
+    compact = re.sub(r"\s+", "", line)
+    summary = re.fullmatch(
+        r"\(\d+\)요약재무정보\((연결|별도)재무제표기준\)", compact
+    )
+    if summary:
+        return "CFS" if summary.group(1) == "연결" else "OFS"
+    # Samsung's annual reports use these exact titles on adjacent pages.
+    # They are headings, not mentions of 연결/별도 in ordinary body text.
+    simple_summary = re.fullmatch(
+        r"[가-힣][.)]?요약(연결|별도)재무정보", compact
+    )
+    if simple_summary:
+        return "CFS" if simple_summary.group(1) == "연결" else "OFS"
+    if re.fullmatch(r"\d+(?:[-.]\d+)?\.?연결재무제표", compact):
+        return "CFS"
+    # DART's '4. 재무제표' section contains separate financial statements.
+    if re.fullmatch(r"\d+(?:[-.]\d+)?\.?재무제표", compact):
+        return "OFS"
+    return None
+
+
+@lru_cache(maxsize=512)
+def _scope_from_nearby_pdf_sections(pdf_file: str, page_number: int) -> str | None:
+    """Verify scope using nearby source-PDF section titles.
+
+    Stage02 sometimes carries 'consolidated' across a section boundary:
+    the subsequent '4. 재무제표' is separate, even if section_path is stale.
+    Three local pages suffice for this guard and are cached across questions.
+    No network access, LLM call, or PDF modification occurs.
+    """
+    if page_number < 1:
+        return None
+    try:
+        import fitz
+
+        with fitz.open(pdf_file) as source:
+            if page_number > len(source):
+                return None
+            headings: list[str] = []
+            for page_index in range(max(0, page_number - 3), page_number):
+                for line in source[page_index].get_text("text").splitlines():
+                    scope = _scope_from_pdf_heading(line)
+                    if scope:
+                        headings.append(scope)
+            return headings[-1] if headings else None
+    except (ImportError, OSError, RuntimeError, ValueError):
+        return None
+
+
+def _source_pdf_scope(meta: dict[str, Any]) -> str | None:
+    """Read only the PDF referenced by this evidence, if available locally."""
+    try:
+        page_number = int(meta.get("page") or 0)
+    except (TypeError, ValueError):
+        return None
+    if page_number < 1:
+        return None
+    pdf_path = Path(str(meta.get("pdf_path") or ""))
+    if not pdf_path.is_file():
+        filename = Path(str(meta.get("source_file") or "")).name
+        pdf_path = PDF_DIR / filename
+    if not pdf_path.is_file() or pdf_path.suffix.lower() != ".pdf":
+        return None
+    return _scope_from_nearby_pdf_sections(str(pdf_path.resolve()), page_number)
 
 
 # ==============================================================================
@@ -130,7 +204,7 @@ def ensure_parsed(args: argparse.Namespace) -> None:
     pdfs = sorted(PDF_DIR.glob("*.pdf"))
     if not pdfs:
         raise SystemExit(f"[ERROR] 원본 PDF가 없습니다: {PDF_DIR}/*.pdf")
-    if not args.force_parse and not is_stale([PARSED_BLOCKS, DOCUMENT_MANIFEST], pdfs):
+    if not args.force_parse and not is_stale([PARSED_BLOCKS, DOCUMENT_MANIFEST], pdfs + [BASE_DIR / '01_parse_audit_reports.py']):
         print("[01] PDF 파싱: 최신 상태 → 건너뜀 (강제 재실행: --force-parse)")
         return
     banner("[01] PDF 본문·표 파싱")
@@ -140,7 +214,7 @@ def ensure_parsed(args: argparse.Namespace) -> None:
 
 
 def ensure_structured(args: argparse.Namespace) -> None:
-    if not args.force_structure and not is_stale([STRUCTURED_EVIDENCE], [PARSED_BLOCKS]):
+    if not args.force_structure and not is_stale([STRUCTURED_EVIDENCE], [PARSED_BLOCKS, BASE_DIR / '02_structure_evidence.py']):
         print("[02] 근거 구조화: 최신 상태 → 건너뜀 (강제 재실행: --force-structure)")
         return
     banner("[02] 근거 구조화")
@@ -148,6 +222,420 @@ def ensure_structured(args: argparse.Namespace) -> None:
     flags = ["--include-unknown-nonfinancial"] if args.include_unknown_nonfinancial else []
     with patched_argv(*flags):
         stage.main()
+
+
+def apply_source_provenance_guard(bundle: dict[str, Any]) -> dict[str, Any]:
+    """
+    04단계의 정규화 결과를 원본 근거 메타데이터로 재검증합니다.
+
+    1. 원문 재무제표의 기간을 우선합니다.
+    2. 요약재무정보의 연결/별도 구분을 복원합니다.
+    3. 증감액을 절대금액과 구분합니다.
+    """
+    import re
+
+    question = bundle.get("question") or {}
+    evidences = bundle.get("evidences") or []
+
+    raw_question = str(
+        bundle.get("raw_question")
+        or question.get("raw_content")
+        or ""
+    )
+
+    def source_scope(raw: Any) -> str | None:
+        """Stage02 emits 'consolidated'/'separate', not just CFS/OFS."""
+        value = re.sub(r"\s+", "", str(raw or "")).casefold()
+        if value in {"cfs", "consolidated", "연결", "연결재무제표", "연결기준"}:
+            return "CFS"
+        if value in {"ofs", "separate", "standalone", "individual", "별도", "개별", "별도재무제표"}:
+            return "OFS"
+        return None
+
+    def verified_summary_scope(meta: dict[str, Any]) -> str | None:
+        """Summary financial tables identify scope in their section heading."""
+        statement = str(meta.get("statement_type") or meta.get("statement") or "").upper()
+        if statement != "SUMMARY":
+            return None
+        sections = meta.get("section_path") or []
+        if isinstance(sections, str):
+            sections = [sections]
+        for item in reversed(sections):
+            title = re.sub(r"\s+", "", str(item))
+            if "요약" in title and "별도" in title:
+                return "OFS"
+            if "요약" in title and "연결" in title:
+                return "CFS"
+        return None
+
+    # Cash-flow movements must not be compared with balance-sheet balances.
+    balance_sheet_stock_metrics = {
+        "current_assets", "noncurrent_assets", "total_assets",
+        "non_current_assets",
+        "current_liabilities", "noncurrent_liabilities", "total_liabilities",
+        "non_current_liabilities",
+        "total_equity", "retained_earnings", "inventories",
+        "trade_receivables", "property_plant_equipment", "intangible_assets",
+        "short_term_financial_products",
+    }
+
+    def is_change_column(ev: dict) -> bool:
+        meta = ev.get("source_metadata") or {}
+
+        column = re.sub(
+            r"\s+", "", str(meta.get("column_header") or "")
+        )
+        raw = str(ev.get("raw_content") or "")
+
+        return (
+            "증감" in column
+            or bool(
+                re.search(
+                    r"\|\s*(?:전년\s*대비\s*)?증감(?:률)?\s*:",
+                    raw,
+                )
+            )
+        )
+
+    # --------------------------------------------------
+    # 1. 질문의 수치 유형 판별
+    # --------------------------------------------------
+    # Question value-type must be fixed before evidence comparison. Otherwise
+    # an UNKNOWN amount question can incorrectly accept CF changes as stocks.
+    q_value_type = str(
+        question.get("value_type") or "UNKNOWN"
+    ).upper()
+
+    change_words = (
+        "증감", "증가", "감소", "변화",
+        "차이", "전년 대비", "성장률",
+    )
+
+    amount_words = (
+        "얼마", "금액", "총계",
+        "매출액", "영업이익",
+        "수치", "원 단위", "알려주세요", "확인할 수 있", "무엇인가요",
+    )
+
+    if q_value_type == "UNKNOWN":
+        if any(word in raw_question for word in change_words):
+            question["value_type"] = "CHANGE"
+            question["value_type_normalization_method"] = "QUESTION_CHANGE_RULE"
+        elif (
+            any(word in raw_question for word in amount_words)
+            or bool(question.get("metric_key"))
+        ):
+            question["value_type"] = "ABSOLUTE"
+            question["value_type_normalization_method"] = "QUESTION_AMOUNT_RULE"
+
+    # --------------------------------------------------
+    # 2. 각 근거의 원본 조건 복원
+    # --------------------------------------------------
+    corrections: list[dict[str, Any]] = []
+    monitored = (
+        "period_start", "period_end", "period_type", "scope",
+        "statement", "value_type", "metric", "metric_key",
+    )
+    for ev in evidences:
+        before = {key: ev.get(key) for key in monitored}
+        meta = ev.get("source_metadata") or {}
+
+        # A. 기간: 제77기 → 2024년 등 원본 매핑 우선
+        period_year = str(meta.get("period_year") or "")
+        period_raw = str(meta.get("period_raw") or "")
+
+        reliable_fiscal_period = (
+            meta.get("period_inference_method") == "fiscal_term_map"
+            and bool(re.fullmatch(r"20\d{2}", period_year))
+            and bool(re.search(r"제\s*\d+\s*기", period_raw))
+        )
+        # Stage02's explicit year belongs to the SOURCE TABLE COLUMN. The
+        # normalization LLM occasionally replaces a 2023 comparative column
+        # with the requested 2025 year; the row/column header must win.
+        explicit_column_year = (
+            meta.get("period_inference_method") == "explicit_year"
+            and bool(re.fullmatch(r"20\d{2}", period_year))
+            and bool(re.search(rf"(?<!\d){re.escape(period_year)}\s*년", period_raw))
+            and bool(re.search(
+                rf"(?<!\d){re.escape(period_year)}\s*년",
+                str(meta.get("column_header") or period_raw),
+            ))
+        )
+
+        current_start = str(ev.get("period_start") or "")
+        current_end = str(ev.get("period_end") or "")
+
+        # An annual fiscal-term column is a stronger source signal than the
+        # LLM's possibly invented year. Include year-end point-in-time dates,
+        # but never overwrite quarter/month-specific values.
+        annual_shape = (
+            bool(re.fullmatch(r"20\d{2}", current_start))
+            and bool(re.fullmatch(r"20\d{2}", current_end))
+        ) or (
+            bool(re.fullmatch(r"20\d{2}_12_31", current_end))
+            and bool(re.fullmatch(r"20\d{2}_(?:01_01|12_31)", current_start))
+        )
+        if (reliable_fiscal_period or explicit_column_year) and annual_shape:
+            period_type = str(ev.get("period_type") or "").upper()
+            if period_type == "POINT_IN_TIME":
+                corrected = f"{period_year}_12_31"
+                ev["period_start"] = corrected
+                ev["period_end"] = corrected
+            else:
+                ev["period_start"] = period_year
+                ev["period_end"] = period_year
+            ev["period_normalization_method"] = (
+                "SOURCE_FISCAL_TERM_OVERRIDE"
+            )
+
+        # B. 연결/별도: verify the actual PDF's nearest section heading first.
+        # Stage02 scope can be stale across a '연결재무제표' -> '재무제표'
+        # transition (confirmed on Hyundai's 2025 PDF, page 218).
+        native_scope = _source_pdf_scope(meta)
+        page_title_scope = source_scope(meta.get("source_title_verified_scope"))
+        canonical_scope = source_scope(meta.get("scope"))
+        if native_scope is not None:
+            ev["scope"] = native_scope
+            ev["scope_normalization_method"] = "PDF_NEARBY_SECTION_OVERRIDE"
+        elif page_title_scope is not None:
+            # Populated by Stage05 ONLY when the source page's native PDF text
+            # itself contains a recognized, explicit financial-summary title.
+            ev["scope"] = page_title_scope
+            ev["scope_normalization_method"] = "PDF_SUMMARY_PAGE_TITLE_OVERRIDE"
+        elif canonical_scope is not None:
+            ev["scope"] = canonical_scope
+            ev["scope_normalization_method"] = (
+                "SOURCE_SCOPE_OVERRIDE"
+            )
+        else:
+            heading_scope = verified_summary_scope(meta)
+            if heading_scope is not None:
+                ev["scope"] = heading_scope
+                ev["scope_normalization_method"] = "SOURCE_SECTION_OVERRIDE"
+            else:
+                ev["scope"] = "UNKNOWN"
+                ev["scope_normalization_method"] = "UNVERIFIED_SOURCE_SCOPE"
+
+        # E. Exact source row label guards against broad LLM / Stage02 metric
+        # aliases. These are different financial line items, not contradictory
+        # figures for the same entity-period-scope-metric tuple.
+        row_label = re.sub(
+            r"\s+|[\[\]ㆍ·]", "", str(meta.get("metric_raw") or "")
+        )
+        source_line_item = None
+        if row_label.startswith("매출원가"):
+            source_line_item = "cost_of_revenue"
+        elif row_label.startswith("기타유동자산"):
+            source_line_item = "other_current_assets"
+        elif row_label.startswith("기타비유동자산"):
+            source_line_item = "other_noncurrent_assets"
+        elif row_label.startswith("기타유동부채"):
+            source_line_item = "other_current_liabilities"
+        elif row_label.startswith("기타비유동부채"):
+            source_line_item = "other_noncurrent_liabilities"
+        if source_line_item is not None:
+            ev["metric"] = source_line_item
+            ev["metric_key"] = source_line_item
+            ev["metric_normalization_method"] = "SOURCE_EXACT_ROW_METRIC_OVERRIDE"
+
+        # C. 수치 유형: '증감' 열은 절대금액이 아님
+        if is_change_column(ev):
+            ev["value_type"] = "CHANGE"
+            ev["value_type_normalization_method"] = (
+                "SOURCE_COLUMN_OVERRIDE"
+            )
+
+        # D. Cash-flow working-capital movements are not BS point-in-time
+        # balances, even when the extracted metric string matches exactly.
+        statement = str(meta.get("statement_type") or meta.get("statement") or "").upper()
+        if statement in {"BS", "IS", "CF", "SUMMARY"}:
+            ev["statement"] = statement
+            ev["statement_normalization_method"] = "SOURCE_STATEMENT_OVERRIDE"
+        if (
+            statement == "CF"
+            and str(ev.get("metric_key") or ev.get("metric") or "").lower()
+            in balance_sheet_stock_metrics
+        ):
+            ev["value_type"] = "CHANGE"
+            ev["value_type_normalization_method"] = "SOURCE_CF_WORKING_CAPITAL_GUARD"
+
+        changed = {
+            key: {"before": before[key], "after": ev.get(key)}
+            for key in monitored if before[key] != ev.get(key)
+        }
+        if changed:
+            corrections.append({
+                "evidence_id": ev.get("record_id"),
+                "changed_fields": changed,
+            })
+
+    bundle["source_guard_audit"] = {
+        "version": CAUSE_RAG_UPGRADE_VERSION,
+        "evidences_checked": len(evidences),
+        "evidences_corrected": len(corrections),
+        "corrections": corrections,
+    }
+    return bundle
+
+def reconcile_display_precision(
+    result: dict[str, Any],
+    bundle: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    표시 정밀도 차이를 검증한다.
+    2개 이상의 근거도 처리하며 원본 수치는 변경하지 않는다.
+    """
+    import re
+    from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+
+    if result.get("overall_status") != "genuine_conflict":
+        return result
+
+    records = result.get("final_context_for_vlm") or []
+    if len(records) < 2:
+        return result
+
+    source = {
+        str(item.get("record_id") or
+            (item.get("source_metadata") or {}).get("evidence_id")): item
+        for item in bundle.get("evidences", [])
+    }
+    linked = [
+        (record, source.get(str(record.get("evidence_id"))))
+        for record in records
+    ]
+    if any(src is None for _, src in linked):
+        return result
+
+    keys = (
+        "entity", "metric", "period_start", "period_end",
+        "period_type", "scope", "value_type", "unit_normalized",
+    )
+    reference = records[0].get("structured", {})
+    if any(
+        any(rec.get("structured", {}).get(k) != reference.get(k)
+            for k in keys)
+        for rec in records[1:]
+    ):
+        return result
+
+    def displayed_step(item):
+        metadata = item.get("source_metadata") or {}
+        raw = str(item.get("value_text_raw") or "")
+        unit = re.sub(
+            r"\s+", "", str(item.get("unit_raw")
+                               or metadata.get("unit_raw")
+                               or metadata.get("unit") or "")
+        )
+
+        # '66조 1,930억원' 등의 최소 표시 단위는 억원.
+        amount = re.search(
+            r"([+-]?\d[\d,]*(?:\.(\d+))?)\s*억\s*원?",
+            raw,
+        )
+        if amount:
+            places = len(amount.group(2) or "")
+            return Decimal(100000000) / (Decimal(10) ** places)
+
+        amount = re.search(
+            r"([+-]?\d[\d,]*(?:\.(\d+))?)\s*조\s*원?",
+            raw,
+        )
+        if amount:
+            places = len(amount.group(2) or "")
+            return Decimal(1000000000000) / (Decimal(10) ** places)
+
+        scales = {
+            "원": Decimal(1),
+            "천원": Decimal(1000),
+            "만원": Decimal(10000),
+            "백만원": Decimal(1000000),
+            "억원": Decimal(100000000),
+            "조원": Decimal(1000000000000),
+        }
+        scale = scales.get(unit)
+        if scale is None:
+            return None
+
+        value_raw = str(
+            item.get("value_raw")
+            or metadata.get("value_raw")
+            or ""
+        )
+        match = re.search(
+            r"[+-]?\d[\d,]*(?:\.(\d+))?", value_raw
+        )
+        if not match:
+            return None
+        places = len(match.group(1) or "")
+        return scale / (Decimal(10) ** places)
+
+    candidates = []
+    try:
+        for record, original in linked:
+            fields = record["structured"]
+            value = Decimal(str(fields["value_normalized"]))
+            step = displayed_step(original)
+            if step is None or step <= 0:
+                return result
+            candidates.append((step, value, record))
+    except (InvalidOperation, ValueError, KeyError, TypeError):
+        return result
+
+    candidates.sort(key=lambda entry: entry[0])
+    finest_step, base_value, best_record = candidates[0]
+
+    # 가장 정밀한 근거가 두 개 이상이면 값이 같아야 함.
+    if any(
+        step == finest_step and value != base_value
+        for step, value, _ in candidates
+    ):
+        return result
+
+    distinct_values = {value for _, value, _ in candidates}
+    if len(distinct_values) <= 1:
+        return result
+
+    for step, displayed_value, _ in candidates:
+        rounded = (
+            (base_value / step).quantize(
+                Decimal(1), rounding=ROUND_HALF_UP
+            ) * step
+        )
+        if rounded != displayed_value:
+            return result
+
+    # 모든 차이가 표시 정밀도로 설명될 때만 Apparent로 변경.
+    for record in records:
+        record["conflict_label"] = "apparent_conflict"
+
+    result["overall_status"] = "apparent_conflict"
+    result["apparent_conflict"] = records
+    result["genuine_conflict"] = []
+    result["no_conflict"] = []
+    result["summary"]["apparent_conflict_count"] = len(records)
+    result["summary"]["genuine_conflict_count"] = 0
+    result["evidence_comparison"]["group_status"] = "apparent_conflict"
+    result["conflict_causes"] = ["display_rounding"]
+
+    coarser = next(
+        (row for row in candidates if row[0] > finest_step),
+        candidates[-1],
+    )
+    result["precision_resolution"] = {
+        "reason": "compatible_with_rounding",
+        "exact_evidence_id": best_record["evidence_id"],
+        "exact_value_krw": str(base_value),
+        "rounded_evidence_id": coarser[2]["evidence_id"],
+        "rounded_value_krw": str(coarser[1]),
+        "rounding_step_krw": str(coarser[0]),
+        "difference_krw": str(abs(base_value - coarser[1])),
+        "compatible_evidence_ids": [
+            row[2]["evidence_id"] for row in candidates
+        ],
+    }
+    return result
+
 
 
 # ==============================================================================
@@ -227,9 +715,35 @@ class Pipeline:
                 )
             )
 
+        # 04 결과를 원본 공시 메타데이터로 검증
+        bundle = apply_source_provenance_guard(bundle)
+        for rec in bundle.get("evidences", []):
+            semantic = rec.get("semantic_condition_key")
+            if isinstance(semantic, dict):
+                for key in (
+                    "period_start", "period_end",
+                    "period_type", "scope", "statement", "metric"
+                ):
+                    semantic[key] = rec.get(key)
+            rec["question_match"] = (
+                self.stage04.deterministic_question_match(
+                    rec, bundle["question"]
+                )
+            )
+
+        # 수정 전 normalized_bundle.json은 그대로 보존
+        # 수정 후 결과를 별도로 저장하여 비교 가능하게 함
+        save_json(
+            qdir / "04_normalized" / "normalized_bundle_source_guarded.json",
+            bundle,
+        )
+
         with timer.lap("06_conflict"):
             question_obj, evidences = self.stage06.parse_bundle(bundle)
             conflict = self.stage06.run_conflict_disambiguator(question_obj, evidences)
+            # 추가: 표시 정밀도로 설명 가능한 수치 차이 검증
+            conflict = reconcile_display_precision(conflict, bundle)
+            conflict = run_arbitration(conflict, bundle)
             self.stage06.save_result(conflict, conflict_path)
 
         with timer.lap("07_answer"):
@@ -246,18 +760,23 @@ class Pipeline:
             )
 
         final = {
+            "pipeline_version": CAUSE_RAG_UPGRADE_VERSION,
             "question": question,
             "answer": answer.get("answer"),
             "overall_status": conflict["overall_status"],
             "called_vlm": answer.get("called_vlm"),
             "conflict_summary": conflict["summary"],
+            "arbitration": conflict.get("arbitration"),
+            "precision_resolution": conflict.get("precision_resolution"),
             "evidence_ids_in_prompt": answer.get("evidence_ids_in_prompt"),
-            "evidence_ids_excluded_genuine": answer.get("evidence_ids_excluded_genuine"),
+            "evidence_ids_genuine_conflict": answer.get("evidence_ids_genuine_conflict"),
+            "evidence_ids_excluded_inapplicable": answer.get("evidence_ids_excluded_inapplicable"),
             "usage": answer.get("usage"),
             "timings_sec": timer.laps,
             "outputs": {
                 "retrieval": str(retrieval_input),
                 "normalized": str(qdir / "04_normalized" / "normalized_bundle.json"),
+                "normalized_source_guarded": str(qdir / "04_normalized" / "normalized_bundle_source_guarded.json"),
                 "conflict": str(conflict_path),
                 "answer": str(answer_path),
             },
@@ -273,7 +792,7 @@ def print_final(index: int, final: dict[str, Any]) -> None:
     print(
         f"[Q{index:02d}] 상태={final['overall_status']} | "
         f"사용 근거={len(final['evidence_ids_in_prompt'] or [])}건 | "
-        f"제외(genuine)={summary['genuine_conflict_count']}건"
+        f"상충 근거={summary['genuine_conflict_count']}건"
     )
     print("-" * 96)
     if final["answer"]:
@@ -376,6 +895,7 @@ def main() -> int:
     save_json(
         run_dir / "run_summary.json",
         {
+            "pipeline_version": CAUSE_RAG_UPGRADE_VERSION,
             "questions": len(questions),
             "failures": failures,
             "elapsed_sec": round(time.perf_counter() - started, 2),
