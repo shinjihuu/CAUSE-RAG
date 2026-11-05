@@ -806,7 +806,16 @@ class OpenAIVisionReranker:
                 error = exc
                 if attempt + 1 < self.attempts:
                     time.sleep(min(10, 2**attempt + random.random()))
-        if self.fallback:
+        # An occasional partial structured VLM response (PAGE_01/PAGE_02
+        # but no PAGE_03/PAGE_04) is a model-format failure, not a reason to
+        # crash the entire 100-question evaluation. After bounded retries,
+        # fall back to pre-vision retrieval scores; NEVER fabricate visual
+        # confirmation. Other API failures still require an explicit opt-in.
+        label_mismatch_only = (
+            isinstance(error, RuntimeError)
+            and str(error).startswith("page label mismatch:")
+        )
+        if self.fallback or label_mismatch_only:
             return {
                 str(candidate.row["page_id"]): {
                     "page_label": label,
@@ -1273,6 +1282,22 @@ def scope_fallback(text: str) -> str:
     return "UNKNOWN"
 
 
+def explicit_financial_summary_scope(native_text: str) -> str | None:
+    """Infer scope only from an original PDF page's financial-summary title."""
+    head = compact_key(str(native_text or "")[:1800])
+    if any(
+        heading in head
+        for heading in ("요약별도재무정보", "요약재무정보별도재무제표기준")
+    ):
+        return "OFS"
+    if any(
+        heading in head
+        for heading in ("요약연결재무정보", "요약재무정보연결재무제표기준")
+    ):
+        return "CFS"
+    return None
+
+
 def year_in(text: str) -> str | None:
     match = re.search(r"20\d{2}", text)
     return match.group() if match else None
@@ -1345,7 +1370,7 @@ class RetrievalIndex:
 
     EVIDENCE_COLUMNS = (
         "evidence_id, document_id, entity, metric_raw, metric_canonical, period_raw, "
-        "period_year, scope, source_file, page, tokens_json, embedding"
+        "period_year, scope, source_file, page, statement, tokens_json, embedding"
     )
     PAGE_COLUMNS = (
         "page_id, document_id, source_file, page, pdf_path, pdf_sha256, tokens_json, embedding"
@@ -1381,6 +1406,7 @@ class RetrievalIndex:
         ]
         self._metric_inputs = [(r["metric_raw"], r["metric_canonical"]) for r in evidence]
         self._scope_inputs = [r["scope"] for r in evidence]
+        self._statement_codes = [str(r["statement"] or "").strip().upper() for r in evidence]
         self._metric_keys: list[Any] | None = None
         self._scope_keys: list[Any] | None = None
 
@@ -1397,6 +1423,23 @@ class RetrievalIndex:
             key: row for key, row in zip(self.page_keys, pages) if key is not None
         }
 
+        # The Stage02 summary scope may be UNKNOWN (or propagated from the
+        # previous section). An explicit same-page PDF title is stronger.
+        self.summary_scope_by_page: dict[tuple[str, int], str] = {}
+        summary_rows = connection.execute(
+            "SELECT source_file,page,native_text FROM page_index "
+            "WHERE native_text LIKE '%요약%' "
+            "AND (native_text LIKE '%별도%' OR native_text LIKE '%연결%')"
+        )
+        for summary_row in summary_rows:
+            key = page_key(summary_row["source_file"], summary_row["page"])
+            scope = explicit_financial_summary_scope(summary_row["native_text"])
+            if key is not None and scope is not None:
+                self.summary_scope_by_page[key] = scope
+        self._verified_summary_scopes = [
+            self.summary_scope_by_page.get(key) for key in self.evidence_page_keys
+        ]
+
     def metadata_scores(
         self, hints: dict[str, Any], module: Any | None
     ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
@@ -1407,7 +1450,7 @@ class RetrievalIndex:
             checks.append(
                 (
                     "entity",
-                    0.45,
+                    0.35,
                     np.fromiter(
                         (k == hints["entity_key"] for k in self._entity_keys),
                         dtype=bool,
@@ -1420,20 +1463,21 @@ class RetrievalIndex:
                 keys = []
                 for raw, canonical_value in self._metric_inputs:
                     canonical = clean_text(canonical_value)
-                    keys.append(
-                        canonical.lower()
-                        if re.fullmatch(r"[a-z][a-z0-9_]*", canonical.lower())
-                        else (
-                            module.canonical_metric_from_text(raw, canonical)
-                            if module
-                            else canonical
-                        )
+                    # Stage02 historically stores aliases such as
+                    # non_current_assets whereas Stage04 standardizes to
+                    # noncurrent_assets. Normalize both sides *before*
+                    # comparing. A valid snake_case string is not proof of
+                    # a canonical metric name.
+                    resolved = (
+                        module.canonical_metric_from_text(raw, canonical)
+                        if module else None
                     )
+                    keys.append(resolved or canonical.lower())
                 self._metric_keys = keys
             checks.append(
                 (
                     "metric",
-                    0.45,
+                    0.35,
                     np.fromiter(
                         (k == hints["metric"] for k in self._metric_keys),
                         dtype=bool,
@@ -1445,7 +1489,7 @@ class RetrievalIndex:
             checks.append(
                 (
                     "period",
-                    0.05,
+                    0.15,
                     np.fromiter(
                         (v == hints["period_year"] for v in self._period_years),
                         dtype=bool,
@@ -1456,15 +1500,21 @@ class RetrievalIndex:
         if hints.get("scope") and hints["scope"] != "UNKNOWN":
             if self._scope_keys is None:
                 self._scope_keys = [
-                    module.normalize_scope(value, "UNKNOWN")[0]
-                    if module
-                    else scope_fallback(value)
-                    for value in self._scope_inputs
+                    page_title_scope
+                    or (
+                        module.normalize_scope(value, "UNKNOWN")[0]
+                        if module
+                        else scope_fallback(value)
+                    )
+                    for value, page_title_scope in zip(
+                        self._scope_inputs,
+                        getattr(self, "_verified_summary_scopes", [None] * count),
+                    )
                 ]
             checks.append(
                 (
                     "scope",
-                    0.05,
+                    0.15,
                     np.fromiter(
                         (k == hints["scope"] for k in self._scope_keys),
                         dtype=bool,
@@ -1521,6 +1571,7 @@ def select_pages(
     images: Path,
     dpi: int,
     pdfs: PdfCache | None = None,
+    preferred_page_keys: Sequence[tuple[str, int]] = (),
 ) -> list[PageCandidate]:
     evidence_prior = defaultdict(float)
     for position in np.argsort(-evidence_scores)[: max(candidate_k * 4, 40)]:
@@ -1535,6 +1586,25 @@ def select_pages(
     ]
     ranked.sort(key=lambda pair: (-pair[0], index.page_ids[pair[1]]))
     chosen = ranked[:candidate_k]
+    # Reserve up to two visual shortlist slots for explicitly scoped source
+    # summary pages whose indexed evidence matches all known question facets.
+    selected_indices = {i for _, i in chosen}
+    page_positions = {key: i for i, key in enumerate(index.page_keys)}
+    replacements = 0
+    for key in preferred_page_keys[:2]:
+        position = page_positions.get(key)
+        if position is None or position in selected_indices:
+            continue
+        if replacements >= len(chosen):
+            break
+        old_position = chosen[-1 - replacements][1]
+        selected_indices.discard(old_position)
+        chosen[-1 - replacements] = (
+            max(float(page_scores[position]), evidence_prior.get(key, 0.0)),
+            position,
+        )
+        selected_indices.add(position)
+        replacements += 1
     # 후보 페이지의 전체 행(native_text 포함)만 조회한다.
     full_rows = fetch_rows(
         connection, "page_index", "page_id", [index.page_ids[i] for _, i in chosen]
@@ -1564,10 +1634,30 @@ def select_pages(
 
 
 def diverse(
-    candidates: Sequence[dict[str, Any]], top_k: int, maximum: int
+    candidates: Sequence[dict[str, Any]], top_k: int, maximum: int,
+    max_per_page: int = 2,
 ) -> list[dict[str, Any]]:
-    """candidates: 점수순으로 정렬된 {"evidence_id", "document_id", ...} 항목."""
-    selected, used, counts = [], set(), Counter()
+    """Choose distinct pages before relaxing limits to fill Top-K.
+
+    Multiple nearly identical rows on the same page should not consume all
+    five slots and crowd out an independently checkable balance-sheet page.
+    Older callers without ``page_key`` remain supported.
+    """
+    selected, used, counts, page_counts = [], set(), Counter(), Counter()
+    for item in candidates:
+        document = clean_text(item.get("document_id")) or "UNKNOWN"
+        page = item.get("page_key")
+        if (item["evidence_id"] in used or counts[document] >= maximum
+                or (page is not None and page_counts[page] >= max_per_page)):
+            continue
+        selected.append(item)
+        used.add(item["evidence_id"])
+        counts[document] += 1
+        if page is not None:
+            page_counts[page] += 1
+        if len(selected) == top_k:
+            return selected
+    # Relax page diversity, but keep document diversity if possible.
     for item in candidates:
         document = clean_text(item.get("document_id")) or "UNKNOWN"
         if item["evidence_id"] in used or counts[document] >= maximum:
@@ -1623,6 +1713,23 @@ def retrieve(
         evidence_dense_raw = index.evidence_matrix @ query_vector
         evidence_lexical_raw = index.evidence_bm25.scores(query_tokens)
         evidence_metadata, metadata_matches = index.metadata_scores(hints, module)
+        # Entity, metric, period and (when requested) scope should agree as a
+        # group. A lexical hit on a wrong-scope disclosure is not enough.
+        facet_requirements = ["entity", "metric", "period"]
+        if hints.get("scope") not in (None, "UNKNOWN"):
+            facet_requirements.append("scope")
+        facet_reliability = (
+            np.logical_and.reduce(
+                [metadata_matches[name] for name in facet_requirements]
+            )
+            if all(name in metadata_matches for name in facet_requirements)
+            else np.zeros(evidence_count, dtype=bool)
+        )
+        title_verified = np.fromiter(
+            (scope is not None for scope in index._verified_summary_scopes),
+            dtype=bool,
+            count=evidence_count,
+        )
         evidence_base = (
             ew[0] * score01(evidence_dense_raw)
             + ew[1] * score01(evidence_lexical_raw)
@@ -1632,6 +1739,21 @@ def retrieve(
         page_dense_raw = index.page_matrix @ query_vector
         page_lexical_raw = index.page_bm25.scores(query_tokens)
         page_base = pw[0] * score01(page_dense_raw) + pw[1] * score01(page_lexical_raw)
+
+        preferred_summary_pages: dict[tuple[str, int], float] = {}
+        for i in np.flatnonzero(facet_reliability & title_verified):
+            key = index.evidence_page_keys[int(i)]
+            if key is not None:
+                preferred_summary_pages[key] = max(
+                    preferred_summary_pages.get(key, float("-inf")),
+                    float(evidence_base[int(i)]),
+                )
+        preferred_page_keys = tuple(
+            key for key, _ in sorted(
+                preferred_summary_pages.items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+        )
 
         candidates = select_pages(
             index,
@@ -1644,6 +1766,7 @@ def retrieve(
             images,
             dpi,
             pdfs,
+            preferred_page_keys=preferred_page_keys,
         )
 
         visual = (
@@ -1700,8 +1823,88 @@ def retrieve(
             [page_score_by_key.get(key, 0.0) for key in index.evidence_page_keys],
             dtype=np.float64,
         )
+            
         final_scores = fw[0] * evidence_base + fw[1] * page_score_vector
-        order = np.argsort(-final_scores, kind="stable")  # 동점은 evidence_id 순(행 순서)
+        facet_bonus = float(os.environ.get("CAUSE_RAG_EXACT_FACET_BONUS", "0.55"))
+        title_bonus = float(os.environ.get("CAUSE_RAG_SUMMARY_TITLE_BONUS", "0.20"))
+        final_scores = (
+            final_scores
+            + facet_bonus * facet_reliability
+            + title_bonus * (facet_reliability & title_verified)
+        )
+
+        # ---------------------------------------------------------
+        # Financial Statement Evidence Priority
+        # ---------------------------------------------------------
+        # 재무제표 전체 수치를 질문할 경우,
+        # 질문 지표에 적합한 재무제표 유형을 우선한다.
+        # 이는 검색 점수 보정이며 정답 값을 사용하지 않는다.
+
+        financial_metric = str(
+            hints.get("metric") or ""
+        ).strip().lower()
+
+        balance_sheet_metrics = {
+            "total_assets",
+            "total_liabilities",
+            "total_equity",
+            "current_assets",
+            "noncurrent_assets",
+            "current_liabilities",
+            "noncurrent_liabilities",
+            "retained_earnings",
+            "cash_and_cash_equivalents",
+            "inventories",
+            "trade_receivables",
+            "property_plant_equipment",
+            "intangible_assets",
+            "short_term_financial_products",
+        }
+
+        income_statement_metrics = {
+            "revenue",
+            "operating_profit",
+            "gross_profit",
+            "net_income",
+            "profit_before_tax",
+        }
+
+        preferred_statements = None
+
+        if financial_metric in balance_sheet_metrics:
+            preferred_statements = {"SUMMARY", "BS"}
+
+        elif financial_metric in income_statement_metrics:
+            preferred_statements = {"SUMMARY", "IS"}
+
+        if preferred_statements is not None:
+
+            statement_priority = np.fromiter(
+                (
+                    1.0
+                    if statement in preferred_statements
+
+                    else 0.0
+                    if statement in {"", "UNKNOWN"}
+
+                    else -1.0
+
+                    for statement in index._statement_codes
+                ),
+                dtype=np.float64,
+                count=evidence_count,
+            )
+
+            # 실험적 보정 가중치
+            STATEMENT_PRIORITY_WEIGHT = float(os.environ.get("CAUSE_RAG_STATEMENT_PRIORITY_WEIGHT", "0.35"))
+
+            final_scores = (
+                final_scores
+                + STATEMENT_PRIORITY_WEIGHT * statement_priority
+            )
+
+        order = np.argsort(-final_scores, kind="stable")
+
 
         page_only_entries = []
         if allow_page_only:
@@ -1721,6 +1924,7 @@ def retrieve(
                     {
                         "evidence_id": "visual_" + detail["page_id"],
                         "document_id": detail["document_id"],
+                        "page_key": page_key(detail["source_file"], detail["page"]),
                         "score": round(float(detail["multimodal_page_score"]), 8),
                         "detail": detail,
                         "raw": raw,
@@ -1734,6 +1938,7 @@ def retrieve(
                 {
                     "evidence_id": index.evidence_ids[int(i)],
                     "document_id": index.document_ids[int(i)],
+                    "page_key": index.evidence_page_keys[int(i)],
                     "score": round(float(final_scores[int(i)]), 8),
                     "row_index": int(i),
                 }
@@ -1786,6 +1991,7 @@ def retrieve(
                         "evidence_lexical_bm25": round(float(evidence_lexical_raw[i]), 8),
                         "metadata_match_score": round(float(evidence_metadata[i]), 8),
                         "metadata_match_details": index.match_details(metadata_matches, i),
+                        "source_title_verified_scope": index._verified_summary_scopes[i],
                         "evidence_base_score": round(float(evidence_base[i]), 8),
                         "multimodal_page_score": round(page_score, 8),
                         "retrieval_score": entry["score"],
@@ -1871,6 +2077,21 @@ def retrieve(
             "question": question,
             "expanded_query_text": query_text,
             "question_hints": hints,
+            "source_aware_reranking": {
+                "version": "v4_explicit_summary_scope_and_exact_facets",
+                "explicit_title_scope_pages_in_index": len(index.summary_scope_by_page),
+                "exact_facet_matching_evidences": int(np.count_nonzero(facet_reliability)),
+                "title_verified_matching_evidences": int(
+                    np.count_nonzero(facet_reliability & title_verified)
+                ),
+                "vision_preferred_pages": [
+                    {"source_file": key[0], "page": key[1]}
+                    for key in preferred_page_keys[:2]
+                ],
+                "exact_facet_bonus": facet_bonus,
+                "summary_title_bonus": title_bonus,
+                "gold_data_used": False,
+            },
             "database_counts": {
                 "evidence": evidence_count,
                 "pages": page_count,
