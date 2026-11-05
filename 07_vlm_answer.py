@@ -88,6 +88,18 @@ CASE_INSTRUCTIONS = {
         "근거에 따라 하나를 선택하거나 차이를 명시하여 답변하세요. "
         "근거 없이 임의로 값을 선택하거나 평균 내지 마세요."
     ),
+    "genuine_conflict": (
+        "질문 조건이 같은 근거들 사이에 정규화 후에도 "
+        "서로 다른 숫자가 남았습니다. "
+        "원본 공시의 표, 정정공시 여부, 제출일, "
+        "추출 품질을 근거로 신뢰성을 검토하세요. "
+        "객관적인 우선순위를 입증할 수 있는 경우에만 "
+        "선택 이유를 밝히고 답하세요. "
+        "입증할 수 없으면 값들을 병기하고 "
+        "결론을 보류하세요. "
+        "상충하는 숫자를 평균 내거나 "
+        "임의로 선택하지 마세요."
+    ),
 }
 
 
@@ -352,6 +364,54 @@ def build_messages(
               f"[질문]\n{raw_question}\n\n"
               f"[근거 {len(records)}건]")
 
+    decision = result.get("arbitration") or {}
+    if decision:
+        header += (
+            "\n\n[구조화된 근거 조정 결과]\n"
+            + json.dumps(
+                {
+                    "action": decision.get("action"),
+                    "selected_evidence_ids":
+                        decision.get("selected_evidence_ids"),
+                    "reason": decision.get("reason"),
+                },
+                ensure_ascii=False,
+            )
+        )
+        if decision.get("action") == "abstain":
+            header += (
+                "\n충돌을 해결할 근거가 충분하지 않습니다. "
+                "숫자를 임의로 선택하지 말고 판단을 보류하세요."
+            )
+        elif decision.get("action") == "select":
+            header += (
+                "\n선택된 근거의 조건과 원문을 재확인한 뒤 "
+                "그 근거를 우선하여 답변하세요."
+            )
+
+    # 06단계에서 확인한 반올림 호환성 전달
+    precision = result.get("precision_resolution")
+
+    if precision:
+        header += (
+            "\n\n[표시 정밀도 검증 결과]\n"
+            "두 근거는 동일한 기업·지표·기간·범위를 나타냅니다.\n"
+            "금액 차이는 서술형 근거의 억원 단위 반올림으로 "
+            "설명할 수 있습니다.\n"
+            "따라서 이 차이만으로 진짜 수치 충돌이라고 "
+            "판단하지 마세요.\n\n"
+            f"정밀한 표 근거 ID: "
+            f"{precision['exact_evidence_id']}\n"
+            f"정밀한 표 수치: "
+            f"{precision['exact_value_krw']} KRW\n"
+            f"반올림된 서술 근거 ID: "
+            f"{precision['rounded_evidence_id']}\n"
+            f"반올림된 서술 수치: "
+            f"{precision['rounded_value_krw']} KRW\n"
+            "최종 답변에는 더 정밀한 표 수치를 우선 사용하고, "
+            "필요하면 서술형 금액이 반올림 표현임을 설명하세요.\n"
+        )
+
     parts: List[Dict[str, Any]] = [{"type": "text", "text": header}]
     readable = [header]
     debug_list: List[Dict[str, Any]] = []
@@ -428,9 +488,11 @@ def run(
     out: Dict[str, Any] = {
         "raw_question": result["question"]["raw_question"],
         "overall_status": status,
+        "arbitration": result.get("arbitration"),
         "model": model,
         "evidence_ids_in_prompt": [r.get("evidence_id") for r in records],
-        "evidence_ids_excluded_genuine": [r.get("evidence_id") for r in result.get("genuine_conflict", [])],
+        "evidence_ids_genuine_conflict": [r.get("evidence_id") for r in result.get("genuine_conflict", [])],
+        "evidence_ids_excluded_inapplicable": [r.get("evidence_id") for r in result.get("excluded_inapplicable", [])],
     }
 
     if status not in CASE_INSTRUCTIONS or not records:
